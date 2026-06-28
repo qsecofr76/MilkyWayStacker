@@ -567,8 +567,18 @@ def _get_triangle_angles(p1, p2, p3):
     except:
         return None
 
+def _gnomonic_project(ra_deg, dec_deg, ra0_deg=295.5, dec0_deg=25.0):
+    ra = np.radians(ra_deg)
+    dec = np.radians(dec_deg)
+    ra0 = np.radians(ra0_deg)
+    dec0 = np.radians(dec0_deg)
+    cos_c = np.sin(dec0) * np.sin(dec) + np.cos(dec0) * np.cos(dec) * np.cos(ra - ra0)
+    x = np.cos(dec) * np.sin(ra - ra0) / cos_c
+    y = (np.cos(dec0) * np.sin(dec) - np.sin(dec0) * np.cos(dec) * np.cos(ra - ra0)) / cos_c
+    return x, y
+
 _db_names = list(STARS_DB.keys())
-_db_pts = np.array([STARS_DB[name] for name in _db_names], dtype=np.float32)
+_db_pts = np.array([_gnomonic_project(STARS_DB[name][0], STARS_DB[name][1]) for name in _db_names], dtype=np.float32)
 _db_triangles = []
 for _i in range(len(_db_names)):
     for _j in range(_i+1, len(_db_names)):
