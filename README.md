@@ -2,6 +2,13 @@
 
 An elegant, open-source astrophotography stacking tool built in Python. Features high-performance sky star alignment and rigid, deformation-free landscape contour registration designed as an alternative to Sequator.
 
+---
+
+### 📥 Download the App
+* **[Download MilkyWayStacker for Windows (Executable)](https://github.com/qsecofr76/MilkyWayStacker/releases/latest)**
+
+---
+
 ## Features
 - **Sky Star Alignment**: Automatically detects stars, filters outliers, and samples stars homogeneously using a spatial grid for precise partial affine alignment.
 - **Deformation-Free Landscape Alignment**: Uses Fourier Phase Correlation on Bilateral-filtered Canny edge contours to achieve sub-pixel accurate rigid landscape registration (translation + rotation) with zero scaling or skew warp distortions.
