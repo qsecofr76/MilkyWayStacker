@@ -2,12 +2,6 @@
 
 A standalone desktop application for astrophotography stacking. It aligns and averages sequences of starry skies while keeping the landscape sharp.
 
----
-
-### 📥 Nightly Build
-* **[Download MilkyWayStacker for Windows (Executable)](https://github.com/qsecofr76/MilkyWayStacker/releases/tag/nightly)**
-
----
 
 ## Technical Overview & Algorithms
 
