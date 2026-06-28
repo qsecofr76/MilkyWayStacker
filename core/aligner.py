@@ -515,16 +515,16 @@ _db_stars_ids = None
 _db_stars_mags = None
 _db_constellations = None
 
-def _gnomonic_project_local(ra_deg, dec_deg, ra0_deg, dec0_deg):
-    ra = np.radians(ra_deg)
-    dec = np.radians(dec_deg)
+def _gnomonic_project_vectorized(ra_deg_arr, dec_deg_arr, ra0_deg, dec0_deg):
+    ra = np.radians(ra_deg_arr)
+    dec = np.radians(dec_deg_arr)
     ra0 = np.radians(ra0_deg)
     dec0 = np.radians(dec0_deg)
     cos_c = np.sin(dec0) * np.sin(dec) + np.cos(dec0) * np.cos(dec) * np.cos(ra - ra0)
     cos_c = np.where(cos_c < 1e-5, 1e-5, cos_c)
     x = np.cos(dec) * np.sin(ra - ra0) / cos_c
     y = (np.cos(dec0) * np.sin(dec) - np.sin(dec0) * np.cos(dec) * np.cos(ra - ra0)) / cos_c
-    return x, y
+    return np.column_stack((x, y))
 
 def _get_triangle_angles(p1, p2, p3):
     a = np.linalg.norm(p2 - p3)
@@ -561,7 +561,7 @@ def _load_sky_catalog():
     
     for sid_str, info in stars_dict.items():
         vmag = info["vmag"]
-        if vmag <= 4.0: # Filter catalog to Bortle 4 stars only
+        if vmag <= 3.3: # Filter catalog to Bortle 3 stars only
             star_ids.append(int(sid_str))
             star_coords.append((info["ra"], info["dec"]))
             star_mags.append(vmag)
@@ -570,8 +570,8 @@ def _load_sky_catalog():
     _db_stars_coords = np.array(star_coords, dtype=np.float32)
     _db_stars_mags = np.array(star_mags, dtype=np.float32)
     
-    # Filter database stars for triangle matching (vmag <= 3.6 to optimize triangle counts)
-    mask_bright = _db_stars_mags <= 3.6
+    # Filter database stars for triangle matching (vmag <= 3.3 to optimize triangle counts)
+    mask_bright = _db_stars_mags <= 3.3
     db_pts_raw = _db_stars_coords[mask_bright]
     n_db = len(db_pts_raw)
     
@@ -595,12 +595,10 @@ def _load_sky_catalog():
                 ra0 = np.mean(pts[:, 0])
                 dec0 = np.mean(pts[:, 1])
                 
-                # Project locally
-                p1 = np.array(_gnomonic_project_local(pts[0, 0], pts[0, 1], ra0, dec0))
-                p2 = np.array(_gnomonic_project_local(pts[1, 0], pts[1, 1], ra0, dec0))
-                p3 = np.array(_gnomonic_project_local(pts[2, 0], pts[2, 1], ra0, dec0))
+                # Project locally (vectorized)
+                p1_xy = _gnomonic_project_vectorized(pts[:, 0], pts[:, 1], ra0, dec0)
                 
-                angles = _get_triangle_angles(p1, p2, p3)
+                angles = _get_triangle_angles(p1_xy[0], p1_xy[1], p1_xy[2])
                 if angles is not None:
                     _db_triangles.append({
                         "angles": angles,
@@ -622,16 +620,32 @@ def draw_constellations(img, mask=None, cancel_event=None):
         return img.copy(), False
         
     eroded = erode_mask(mask, radius=15) if mask is not None else None
-    stars = detect_stars_centroids(img, eroded, contrast_threshold=0.04, sigma=1.6, max_stars=80)
     
+    # Tune star detection locally to keep 10 <= len(stars) <= 28
+    contrast = 0.04
+    sigma = 1.6
+    stars = detect_stars_centroids(img, eroded, contrast_threshold=contrast, sigma=sigma, max_stars=80)
+    
+    if len(stars) > 28:
+        for attempt_contrast in [0.08, 0.12, 0.16, 0.20, 0.25, 0.30]:
+            stars = detect_stars_centroids(img, eroded, contrast_threshold=attempt_contrast, sigma=sigma, max_stars=80)
+            if len(stars) <= 28:
+                break
+    elif len(stars) < 10:
+        for attempt_contrast in [0.02, 0.01, 0.005]:
+            stars = detect_stars_centroids(img, eroded, contrast_threshold=attempt_contrast, sigma=sigma, max_stars=80)
+            if len(stars) >= 10:
+                break
+                
     if len(stars) < 4:
         return img.copy(), False
         
-    candidate_stars = stars[:25]
+    # Only take top 18 stars for combinations to ensure extreme speed
+    candidate_stars = stars[:18]
     h, w, c = img.shape
     
-    # Filter database stars for triangle matching (vmag <= 3.6)
-    mask_bright = _db_stars_mags <= 3.6
+    # Filter database stars for triangle matching (vmag <= 3.3)
+    mask_bright = _db_stars_mags <= 3.3
     db_ids_bright = _db_stars_ids[mask_bright]
     
     best_score = 0
@@ -661,8 +675,8 @@ def draw_constellations(img, mask=None, cancel_event=None):
                         ra0 = dbt["ra0"]
                         dec0 = dbt["dec0"]
                         
-                        # Project database stars using this local candidate center
-                        db_pts_proj = np.array([_gnomonic_project_local(_db_stars_coords[idx, 0], _db_stars_coords[idx, 1], ra0, dec0) for idx in range(len(_db_stars_coords))], dtype=np.float32)
+                        # Project database stars locally (vectorized!)
+                        db_pts_proj = _gnomonic_project_vectorized(_db_stars_coords[:, 0], _db_stars_coords[:, 1], ra0, dec0).astype(np.float32)
                         
                         db_idx_in_all = [np.where(_db_stars_ids == db_ids_bright[idx])[0][0] for idx in db_idx]
                         db_tri_pts = db_pts_proj[db_idx_in_all]
@@ -671,6 +685,11 @@ def draw_constellations(img, mask=None, cancel_event=None):
                             ordered_db = db_tri_pts[list(p)]
                             M, _ = cv2.estimateAffinePartial2D(ordered_db, img_tri_pts)
                             if M is not None:
+                                # Conformal scale check to avoid verifying unphysical mappings
+                                scale = np.sqrt(M[0, 0]**2 + M[0, 1]**2)
+                                if scale < 0.1 or scale > 200.0:
+                                    continue
+                                    
                                 proj = cv2.transform(np.expand_dims(db_pts_proj, axis=0), M)[0]
                                 
                                 # Enforce 1-to-1 matching constraint to prevent collapsed cluster bug
@@ -691,8 +710,8 @@ def draw_constellations(img, mask=None, cancel_event=None):
                                 
     out_img = img.copy()
     if best_transform is not None and best_score >= 5:
-        # Project all database stars to pixel space using the best projection center
-        db_pts_proj = np.array([_gnomonic_project_local(_db_stars_coords[idx, 0], _db_stars_coords[idx, 1], best_ra0, best_dec0) for idx in range(len(_db_stars_coords))], dtype=np.float32)
+        # Project all database stars to pixel space using the best projection center (vectorized!)
+        db_pts_proj = _gnomonic_project_vectorized(_db_stars_coords[:, 0], _db_stars_coords[:, 1], best_ra0, best_dec0).astype(np.float32)
         proj_pts_all = cv2.transform(np.expand_dims(db_pts_proj, axis=0), best_transform)[0]
         
         proj_pts = {}

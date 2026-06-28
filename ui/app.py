@@ -555,11 +555,22 @@ class MilkyWayStackerApp(ctk.CTk):
             return
 
         if self.show_constellations_var.get():
+            mask = self.canvas.get_mask()
+            if mask is None or np.sum(mask == 255) < 1000:
+                self.show_constellations_var.set(False)
+                self.constellation_cb.deselect()
+                messagebox.showwarning(
+                    "Paint Sky Mask First",
+                    "Please paint or select the starry sky area using the brush or 'Select All Sky' before enabling constellations.\n\n"
+                    "This focuses the recognition engine on the stars and prevents false detections on landscape features."
+                )
+                return
+
             # Signal cancel to any previous run
             self.constellation_cancel_event.set()
             self.constellation_cancel_event.clear()
             
-            self.status_label.configure(text="🔍 Solving sky coordinates (Bortle 4 catalog)... Please wait.")
+            self.status_label.configure(text="🔍 Solving sky coordinates (Bortle 3 catalog)... Please wait.")
             self.update_idletasks()
             
             def run_solve():
