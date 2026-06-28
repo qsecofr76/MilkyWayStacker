@@ -437,7 +437,7 @@ def find_constellation(stars, template_coords, connections, min_matches=4):
     """
     Finds a constellation pattern using rotation/scale-invariant template matching.
     """
-    if len(stars) < len(template_coords):
+    if len(stars) < min_matches:
         return []
 
     best_score = 0
@@ -580,7 +580,8 @@ def draw_constellations(img, mask=None):
     
     found_constellations = []
     for t in templates:
-        lines = find_constellation(stars, t["coords"], t["conn"], t["min"])
+        min_matches = max(3, int(np.ceil(len(t["coords"]) * 0.75)))
+        lines = find_constellation(stars, t["coords"], t["conn"], min_matches)
         if lines:
             found_constellations.append(t["name"])
             for pt1, pt2 in lines:
