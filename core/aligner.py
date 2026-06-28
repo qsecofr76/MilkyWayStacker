@@ -507,90 +507,178 @@ def find_constellation(stars, template_coords, connections, min_matches=4):
         return best_projected_lines
     return []
 
+# Celestial Coordinates Database for Plate Solving (RA in degrees, Dec in degrees)
+STARS_DB = {
+    "Deneb": (20.69 * 15, 45.28),
+    "Sadr": (20.37 * 15, 40.26),
+    "Albireo": (19.51 * 15, 27.96),
+    "Gienah": (20.77 * 15, 33.97),
+    "Fawaris": (19.61 * 15, 45.13),
+    "Vega": (18.62 * 15, 38.78),
+    "Sheliak": (18.84 * 15, 33.36),
+    "Sulafat": (18.98 * 15, 32.69),
+    "d_Lyrae": (18.91 * 15, 36.97),
+    "z_Lyrae": (18.75 * 15, 37.60),
+    "Altair": (19.85 * 15, 8.87),
+    "Tarazed": (19.77 * 15, 10.61),
+    "Alshain": (19.92 * 15, 6.41),
+    "a_Sge": (19.67 * 15, 18.01),
+    "b_Sge": (19.68 * 15, 17.47),
+    "g_Sge": (19.98 * 15, 19.49),
+    "d_Sge": (19.79 * 15, 18.53),
+    "e_Sge": (20.08 * 15, 20.11),
+    "aSualocin": (20.66 * 15, 15.91),
+    "bRotanev": (20.62 * 15, 14.59),
+    "gDelphini": (20.78 * 15, 16.12),
+    "dDelphini": (20.72 * 15, 15.08),
+}
+
+CONSTELLATIONS_DB = {
+    "Cygnus (Cigno)": {
+        "conn": [("Deneb", "Sadr"), ("Sadr", "Albireo"), ("Sadr", "Gienah"), ("Sadr", "Fawaris")]
+    },
+    "Lyra (Lira)": {
+        "conn": [("Vega", "z_Lyrae"), ("z_Lyrae", "d_Lyrae"), ("d_Lyrae", "Sulafat"), ("Sulafat", "Sheliak"), ("Sheliak", "z_Lyrae")]
+    },
+    "Sagitta (Freccia)": {
+        "conn": [("d_Sge", "a_Sge"), ("d_Sge", "b_Sge"), ("a_Sge", "b_Sge"), ("d_Sge", "g_Sge"), ("g_Sge", "e_Sge")]
+    },
+    "Aquila": {
+        "conn": [("Altair", "Tarazed"), ("Altair", "Alshain")]
+    },
+    "Delphinus (Delfino)": {
+        "conn": [("aSualocin", "bRotanev"), ("bRotanev", "dDelphini"), ("dDelphini", "gDelphini"), ("gDelphini", "aSualocin")]
+    }
+}
+
+# Precompute database triangles for blind plate solving
+def _get_triangle_angles(p1, p2, p3):
+    a = np.linalg.norm(p2 - p3)
+    b = np.linalg.norm(p1 - p3)
+    c = np.linalg.norm(p1 - p2)
+    if a < 1e-5 or b < 1e-5 or c < 1e-5:
+        return None
+    try:
+        cosA = np.clip((b**2 + c**2 - a**2) / (2 * b * c), -1.0, 1.0)
+        cosB = np.clip((a**2 + c**2 - b**2) / (2 * a * c), -1.0, 1.0)
+        cosC = np.clip((a**2 + b**2 - c**2) / (2 * a * b), -1.0, 1.0)
+        return sorted([np.degrees(np.arccos(cosA)), np.degrees(np.arccos(cosB)), np.degrees(np.arccos(cosC))])
+    except:
+        return None
+
+_db_names = list(STARS_DB.keys())
+_db_pts = np.array([STARS_DB[name] for name in _db_names], dtype=np.float32)
+_db_triangles = []
+for _i in range(len(_db_names)):
+    for _j in range(_i+1, len(_db_names)):
+        for _k in range(_j+1, len(_db_names)):
+            _angles = _get_triangle_angles(_db_pts[_i], _db_pts[_j], _db_pts[_k])
+            if _angles is not None:
+                _db_triangles.append({"angles": _angles, "indices": [_i, _j, _k]})
+
 def draw_constellations(img, mask=None):
     """
-    Detects and draws thin green constellation outlines onto the image.
-    Supports a rich local catalog of 9 prominent constellations.
+    Solves the starry sky using a local offline plate-solving engine (triangle-based hashing).
+    Projects and overlays identified constellations onto the image canvas.
     """
     eroded = erode_mask(mask, radius=15) if mask is not None else None
-    # We use default detection values here
     stars = detect_stars_centroids(img, eroded, contrast_threshold=0.04, sigma=1.6, max_stars=80)
     
     if len(stars) < 4:
         return img.copy(), False
         
-    out_img = img.copy()
+    # Take top stars to evaluate combinations
+    candidate_stars = stars[:25]
+    h, w, c = img.shape
     
-    templates = [
-        {
-            "name": "Cassiopeia",
-            "coords": np.float32([[-0.9, 0.4], [-0.45, -0.4], [0.0, 0.4], [0.45, -0.4], [0.9, 0.3]]),
-            "conn": [(0, 1), (1, 2), (2, 3), (3, 4)],
-            "min": 5
-        },
-        {
-            "name": "Ursa Major (Big Dipper)",
-            "coords": np.float32([[-1.2, 0.8], [-0.8, 0.6], [-0.5, 0.3], [-0.1, 0.1], [-0.2, -0.4], [0.4, -0.4], [0.5, 0.2]]),
-            "conn": [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 3)],
-            "min": 6
-        },
-        {
-            "name": "Orion",
-            "coords": np.float32([[-0.2, 0.0], [0.0, 0.0], [0.2, 0.0], [-0.5, 0.6], [0.5, 0.6], [-0.4, -0.7], [0.4, -0.7]]),
-            "conn": [(0, 1), (1, 2), (0, 3), (2, 4), (3, 4), (0, 5), (2, 6), (5, 6)],
-            "min": 6
-        },
-        {
-            "name": "Cygnus (Cigno)",
-            "coords": np.float32([[0.0, 0.8], [0.0, 0.1], [0.0, -0.8], [-0.6, 0.3], [0.6, 0.3]]),
-            "conn": [(0, 1), (1, 2), (1, 3), (1, 4)],
-            "min": 5
-        },
-        {
-            "name": "Sagitta (Freccia)",
-            "coords": np.float32([[0.0, 0.0], [-0.4, 0.3], [-0.4, -0.3], [0.4, 0.0], [0.8, 0.0]]),
-            "conn": [(0, 1), (0, 2), (1, 2), (0, 3), (3, 4)],
-            "min": 4
-        },
-        {
-            "name": "Lyra (Lira)",
-            "coords": np.float32([[0.0, 0.7], [-0.2, 0.2], [0.2, 0.2], [-0.2, -0.4], [0.2, -0.4]]),
-            "conn": [(0, 1), (1, 2), (2, 4), (4, 3), (3, 1)],
-            "min": 5
-        },
-        {
-            "name": "Aquila",
-            "coords": np.float32([[0.0, 0.1], [0.0, 0.6], [0.0, -0.4], [-0.6, -0.1], [0.6, -0.1]]),
-            "conn": [(1, 0), (0, 2), (0, 3), (0, 4)],
-            "min": 5
-        },
-        {
-            "name": "Scorpius (Scorpione)",
-            "coords": np.float32([[-0.6, 0.8], [-0.4, 0.6], [-0.5, 0.4], [0.0, 0.2], [0.1, -0.2], [0.3, -0.5], [0.6, -0.6], [0.8, -0.4]]),
-            "conn": [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 7)],
-            "min": 7
-        },
-        {
-            "name": "Sagittarius (Teapot)",
-            "coords": np.float32([[-0.6, -0.4], [-0.2, -0.4], [-0.2, 0.2], [-0.6, 0.2], [0.2, 0.2], [0.4, -0.1], [0.2, -0.4], [-0.9, -0.1]]),
-            "conn": [(0, 1), (1, 2), (2, 3), (3, 0), (2, 4), (4, 5), (5, 6), (6, 1), (3, 7), (0, 7)],
-            "min": 7
-        }
-    ]
+    best_score = 0
+    best_transform = None
     
-    found_constellations = []
-    for t in templates:
-        min_matches = max(3, int(np.ceil(len(t["coords"]) * 0.75)))
-        lines = find_constellation(stars, t["coords"], t["conn"], min_matches)
-        if lines:
-            found_constellations.append(t["name"])
-            for pt1, pt2 in lines:
-                cv2.line(out_img, pt1, pt2, (0, 255, 0), 2, lineType=cv2.LINE_AA)
+    # Try finding matching triangles
+    for i in range(len(candidate_stars)):
+        for j in range(i+1, len(candidate_stars)):
+            for k in range(j+1, len(candidate_stars)):
+                angles = _get_triangle_angles(candidate_stars[i], candidate_stars[j], candidate_stars[k])
+                if angles is None:
+                    continue
                 
-    found_any = len(found_constellations) > 0
-    if found_any:
-        names_str = ", ".join(found_constellations)
-        cv2.putText(out_img, f"Found: {names_str}", (20, out_img.shape[0] - 30), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, lineType=cv2.LINE_AA)
-                    
-    return out_img, found_any
+                # Match angles against database triangles
+                for dbt in _db_triangles:
+                    if (abs(angles[0] - dbt["angles"][0]) < 1.5 and 
+                        abs(angles[1] - dbt["angles"][1]) < 1.5):
+                        
+                        db_idx = dbt["indices"]
+                        db_tri_pts = _db_pts[db_idx]
+                        img_tri_pts = np.array([candidate_stars[i], candidate_stars[j], candidate_stars[k]], dtype=np.float32)
+                        
+                        # Establish one-to-one vertex correspondence by sorting by vertex angle size
+                        def sort_verts(pts):
+                            side_a = np.linalg.norm(pts[1] - pts[2])
+                            side_b = np.linalg.norm(pts[0] - pts[2])
+                            side_c = np.linalg.norm(pts[0] - pts[1])
+                            c0 = np.clip((side_b**2 + side_c**2 - side_a**2) / (2 * side_b * side_c), -1.0, 1.0)
+                            c1 = np.clip((side_a**2 + side_c**2 - side_b**2) / (2 * side_a * side_c), -1.0, 1.0)
+                            c2 = np.clip((side_a**2 + side_b**2 - side_c**2) / (2 * side_a * side_b), -1.0, 1.0)
+                            order = np.argsort([np.arccos(c0), np.arccos(c1), np.arccos(c2)])
+                            return pts[order]
+                        
+                        # Estimate full affine transform allowing reflections
+                        M, _ = cv2.estimateAffine2D(sort_verts(db_tri_pts), sort_verts(img_tri_pts))
+                        if M is not None:
+                            # Project all database stars
+                            proj = cv2.transform(np.expand_dims(_db_pts, axis=0), M)[0]
+                            # Count matching stars
+                            match_count = 0
+                            for p in proj:
+                                dists = np.linalg.norm(stars - p, axis=1)
+                                if np.any(dists < 30.0):
+                                    match_count += 1
+                                    
+                            if match_count > best_score:
+                                best_score = match_count
+                                best_transform = M
+                                
+    out_img = img.copy()
+    if best_transform is not None and best_score >= 6:
+        # Project all database stars to pixel space
+        proj_pts = {}
+        for idx, name in enumerate(_db_names):
+            radec = np.array([[_db_pts[idx]]], dtype=np.float32)
+            pixel = cv2.transform(radec, best_transform)[0][0]
+            proj_pts[name] = (int(pixel[0]), int(pixel[1]))
+            
+        found_names = []
+        # Draw connections for matched constellations
+        for cname, cinfo in CONSTELLATIONS_DB.items():
+            # Count stars belonging to this constellation that are in the frame
+            all_stars_in_constellation = list(set([s for conn in cinfo["conn"] for s in conn]))
+            visible_stars = 0
+            for sname in all_stars_in_constellation:
+                if sname in proj_pts:
+                    px, py = proj_pts[sname]
+                    if 0 <= px < w and 0 <= py < h:
+                        visible_stars += 1
+            
+            # Draw constellation if a significant portion is visible
+            if visible_stars >= max(2, int(len(all_stars_in_constellation) * 0.5)):
+                found_names.append(cname)
+                # Draw connections
+                for s1, s2 in cinfo["conn"]:
+                    if s1 in proj_pts and s2 in proj_pts:
+                        cv2.line(out_img, proj_pts[s1], proj_pts[s2], (0, 255, 0), 2, lineType=cv2.LINE_AA)
+                # Draw labels for main stars of the constellation
+                for sname in all_stars_in_constellation:
+                    if sname in proj_pts:
+                        px, py = proj_pts[sname]
+                        if 0 <= px < w and 0 <= py < h:
+                            cv2.circle(out_img, (px, py), 4, (0, 0, 255), -1, lineType=cv2.LINE_AA)
+                            cv2.putText(out_img, sname.split("_")[0], (px + 8, py - 8), 
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1, lineType=cv2.LINE_AA)
+                                        
+        if found_names:
+            names_str = ", ".join(found_names)
+            cv2.putText(out_img, f"Solved: {names_str}", (20, h - 30), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, lineType=cv2.LINE_AA)
+            return out_img, True
+            
+    return out_img, False
