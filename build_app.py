@@ -32,6 +32,7 @@ PyInstaller.__main__.run([
     '--name=MilkyWayStacker',
     '--onefile',
     '--windowed',
+    '--icon=logo.ico',
     f'--add-data={add_data_ctk}',
     f'--add-data={add_data_logo}',
     f'--add-data=core{sep}core',
