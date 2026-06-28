@@ -34,6 +34,7 @@ PyInstaller.__main__.run([
     '--windowed',
     f'--add-data={add_data_ctk}',
     f'--add-data={add_data_logo}',
+    f'--add-data=core{sep}core',
     '--clean',
     '--noconfirm'
 ])

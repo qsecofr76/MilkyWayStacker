@@ -508,51 +508,24 @@ def find_constellation(stars, template_coords, connections, min_matches=4):
         return best_projected_lines
     return []
 
-# Celestial Coordinates Database for Plate Solving (RA in degrees, Dec in degrees)
-STARS_DB = {
-    "Deneb": (20.69 * 15, 45.28),
-    "Sadr": (20.37 * 15, 40.26),
-    "Albireo": (19.51 * 15, 27.96),
-    "Gienah": (20.77 * 15, 33.97),
-    "Fawaris": (19.61 * 15, 45.13),
-    "Vega": (18.62 * 15, 38.78),
-    "Sheliak": (18.84 * 15, 33.36),
-    "Sulafat": (18.98 * 15, 32.69),
-    "d_Lyrae": (18.91 * 15, 36.97),
-    "z_Lyrae": (18.75 * 15, 37.60),
-    "Altair": (19.85 * 15, 8.87),
-    "Tarazed": (19.77 * 15, 10.61),
-    "Alshain": (19.92 * 15, 6.41),
-    "a_Sge": (19.67 * 15, 18.01),
-    "b_Sge": (19.68 * 15, 17.47),
-    "g_Sge": (19.98 * 15, 19.49),
-    "d_Sge": (19.79 * 15, 18.53),
-    "e_Sge": (20.08 * 15, 20.11),
-    "aSualocin": (20.66 * 15, 15.91),
-    "bRotanev": (20.62 * 15, 14.59),
-    "gDelphini": (20.78 * 15, 16.12),
-    "dDelphini": (20.72 * 15, 15.08),
-}
+# Celestial Coordinates Database for Plate Solving (loaded from sky_catalog.json)
+_db_triangles = []
+_db_stars_coords = None
+_db_stars_ids = None
+_db_stars_mags = None
+_db_constellations = None
 
-CONSTELLATIONS_DB = {
-    "Cygnus (Cigno)": {
-        "conn": [("Deneb", "Sadr"), ("Sadr", "Albireo"), ("Sadr", "Gienah"), ("Sadr", "Fawaris")]
-    },
-    "Lyra (Lira)": {
-        "conn": [("Vega", "z_Lyrae"), ("z_Lyrae", "d_Lyrae"), ("d_Lyrae", "Sulafat"), ("Sulafat", "Sheliak"), ("Sheliak", "z_Lyrae")]
-    },
-    "Sagitta (Freccia)": {
-        "conn": [("d_Sge", "a_Sge"), ("d_Sge", "b_Sge"), ("a_Sge", "b_Sge"), ("d_Sge", "g_Sge"), ("g_Sge", "e_Sge")]
-    },
-    "Aquila": {
-        "conn": [("Altair", "Tarazed"), ("Altair", "Alshain")]
-    },
-    "Delphinus (Delfino)": {
-        "conn": [("aSualocin", "bRotanev"), ("bRotanev", "dDelphini"), ("dDelphini", "gDelphini"), ("gDelphini", "aSualocin")]
-    }
-}
+def _gnomonic_project_local(ra_deg, dec_deg, ra0_deg, dec0_deg):
+    ra = np.radians(ra_deg)
+    dec = np.radians(dec_deg)
+    ra0 = np.radians(ra0_deg)
+    dec0 = np.radians(dec0_deg)
+    cos_c = np.sin(dec0) * np.sin(dec) + np.cos(dec0) * np.cos(dec) * np.cos(ra - ra0)
+    cos_c = np.where(cos_c < 1e-5, 1e-5, cos_c)
+    x = np.cos(dec) * np.sin(ra - ra0) / cos_c
+    y = (np.cos(dec0) * np.sin(dec) - np.sin(dec0) * np.cos(dec) * np.cos(ra - ra0)) / cos_c
+    return x, y
 
-# Precompute database triangles for blind plate solving
 def _get_triangle_angles(p1, p2, p3):
     a = np.linalg.norm(p2 - p3)
     b = np.linalg.norm(p1 - p3)
@@ -567,43 +540,103 @@ def _get_triangle_angles(p1, p2, p3):
     except:
         return None
 
-def _gnomonic_project(ra_deg, dec_deg, ra0_deg=295.5, dec0_deg=25.0):
-    ra = np.radians(ra_deg)
-    dec = np.radians(dec_deg)
-    ra0 = np.radians(ra0_deg)
-    dec0 = np.radians(dec0_deg)
-    cos_c = np.sin(dec0) * np.sin(dec) + np.cos(dec0) * np.cos(dec) * np.cos(ra - ra0)
-    x = np.cos(dec) * np.sin(ra - ra0) / cos_c
-    y = (np.cos(dec0) * np.sin(dec) - np.sin(dec0) * np.cos(dec) * np.cos(ra - ra0)) / cos_c
-    return x, y
+def _load_sky_catalog():
+    global _db_triangles, _db_stars_coords, _db_stars_ids, _db_stars_mags, _db_constellations
+    if _db_stars_coords is not None:
+        return
+        
+    catalog_path = os.path.join(os.path.dirname(__file__), "sky_catalog.json")
+    if not os.path.exists(catalog_path):
+        return
+        
+    with open(catalog_path, "r") as f:
+        catalog = json.load(f)
+        
+    stars_dict = catalog["stars"]
+    _db_constellations = catalog["constellations"]
+    
+    star_ids = []
+    star_coords = []
+    star_mags = []
+    
+    for sid_str, info in stars_dict.items():
+        star_ids.append(int(sid_str))
+        star_coords.append((info["ra"], info["dec"]))
+        star_mags.append(info["vmag"])
+        
+    _db_stars_ids = np.array(star_ids, dtype=np.int32)
+    _db_stars_coords = np.array(star_coords, dtype=np.float32)
+    _db_stars_mags = np.array(star_mags, dtype=np.float32)
+    
+    # Filter database stars for triangle matching (vmag <= 3.8 to optimize triangle counts)
+    mask_bright = _db_stars_mags <= 3.8
+    db_pts_raw = _db_stars_coords[mask_bright]
+    n_db = len(db_pts_raw)
+    
+    max_dist = 20.0
+    dist_matrix = np.zeros((n_db, n_db))
+    for i in range(n_db):
+        for j in range(i+1, n_db):
+            d = np.linalg.norm(db_pts_raw[i] - db_pts_raw[j])
+            dist_matrix[i, j] = d
+            dist_matrix[j, i] = d
+            
+    for i in range(n_db):
+        for j in range(i+1, n_db):
+            if dist_matrix[i, j] > max_dist:
+                continue
+            for k in range(j+1, n_db):
+                if dist_matrix[i, k] > max_dist or dist_matrix[j, k] > max_dist:
+                    continue
+                    
+                pts = db_pts_raw[[i, j, k]]
+                ra0 = np.mean(pts[:, 0])
+                dec0 = np.mean(pts[:, 1])
+                
+                # Project locally
+                p1 = np.array(_gnomonic_project_local(pts[0, 0], pts[0, 1], ra0, dec0))
+                p2 = np.array(_gnomonic_project_local(pts[1, 0], pts[1, 1], ra0, dec0))
+                p3 = np.array(_gnomonic_project_local(pts[2, 0], pts[2, 1], ra0, dec0))
+                
+                angles = _get_triangle_angles(p1, p2, p3)
+                if angles is not None:
+                    _db_triangles.append({
+                        "angles": angles,
+                        "db_indices": [i, j, k],
+                        "ra0": ra0,
+                        "dec0": dec0
+                    })
 
-_db_names = list(STARS_DB.keys())
-_db_pts = np.array([_gnomonic_project(STARS_DB[name][0], STARS_DB[name][1]) for name in _db_names], dtype=np.float32)
-_db_triangles = []
-for _i in range(len(_db_names)):
-    for _j in range(_i+1, len(_db_names)):
-        for _k in range(_j+1, len(_db_names)):
-            _angles = _get_triangle_angles(_db_pts[_i], _db_pts[_j], _db_pts[_k])
-            if _angles is not None:
-                _db_triangles.append({"angles": _angles, "indices": [_i, _j, _k]})
+import json
+import os
 
 def draw_constellations(img, mask=None):
     """
     Solves the starry sky using a local offline plate-solving engine (triangle-based hashing).
     Projects and overlays identified constellations onto the image canvas.
     """
+    _load_sky_catalog()
+    if _db_stars_coords is None:
+        return img.copy(), False
+        
     eroded = erode_mask(mask, radius=15) if mask is not None else None
     stars = detect_stars_centroids(img, eroded, contrast_threshold=0.04, sigma=1.6, max_stars=80)
     
     if len(stars) < 4:
         return img.copy(), False
         
-    # Take top stars to evaluate combinations
     candidate_stars = stars[:25]
     h, w, c = img.shape
     
+    # Filter database stars for triangle matching (vmag <= 3.8)
+    mask_bright = _db_stars_mags <= 3.8
+    db_ids_bright = _db_stars_ids[mask_bright]
+    
     best_score = 0
     best_transform = None
+    best_ra0 = 0.0
+    best_dec0 = 0.0
+    
     perms = list(itertools.permutations([0, 1, 2]))
     
     # Try finding matching triangles
@@ -616,23 +649,25 @@ def draw_constellations(img, mask=None):
                 
                 img_tri_pts = np.array([candidate_stars[i], candidate_stars[j], candidate_stars[k]], dtype=np.float32)
                 
-                # Match angles against database triangles
                 for dbt in _db_triangles:
                     if (abs(angles[0] - dbt["angles"][0]) < 1.5 and 
                         abs(angles[1] - dbt["angles"][1]) < 1.5):
                         
-                        db_idx = dbt["indices"]
-                        db_tri_pts = _db_pts[db_idx]
+                        db_idx = dbt["db_indices"]
+                        ra0 = dbt["ra0"]
+                        dec0 = dbt["dec0"]
                         
-                        # Test all 6 vertex mappings to resolve correspondence correctly
+                        # Project database stars using this local candidate center
+                        db_pts_proj = np.array([_gnomonic_project_local(_db_stars_coords[idx, 0], _db_stars_coords[idx, 1], ra0, dec0) for idx in range(len(_db_stars_coords))], dtype=np.float32)
+                        
+                        db_idx_in_all = [np.where(_db_stars_ids == db_ids_bright[idx])[0][0] for idx in db_idx]
+                        db_tri_pts = db_pts_proj[db_idx_in_all]
+                        
                         for p in perms:
                             ordered_db = db_tri_pts[list(p)]
-                            
-                            # Estimate similarity transform (translation, rotation, uniform scale)
                             M, _ = cv2.estimateAffinePartial2D(ordered_db, img_tri_pts)
                             if M is not None:
-                                # Project all database stars
-                                proj = cv2.transform(np.expand_dims(_db_pts, axis=0), M)[0]
+                                proj = cv2.transform(np.expand_dims(db_pts_proj, axis=0), M)[0]
                                 
                                 # Enforce 1-to-1 matching constraint to prevent collapsed cluster bug
                                 matched_img_indices = set()
@@ -647,44 +682,42 @@ def draw_constellations(img, mask=None):
                                 if match_count > best_score:
                                     best_score = match_count
                                     best_transform = M
+                                    best_ra0 = ra0
+                                    best_dec0 = dec0
                                 
     out_img = img.copy()
     if best_transform is not None and best_score >= 5:
-        # Project all database stars to pixel space
+        # Project all database stars to pixel space using the best projection center
+        db_pts_proj = np.array([_gnomonic_project_local(_db_stars_coords[idx, 0], _db_stars_coords[idx, 1], best_ra0, best_dec0) for idx in range(len(_db_stars_coords))], dtype=np.float32)
+        proj_pts_all = cv2.transform(np.expand_dims(db_pts_proj, axis=0), best_transform)[0]
+        
         proj_pts = {}
-        for idx, name in enumerate(_db_names):
-            radec = np.array([[_db_pts[idx]]], dtype=np.float32)
-            pixel = cv2.transform(radec, best_transform)[0][0]
-            proj_pts[name] = (int(pixel[0]), int(pixel[1]))
+        for idx, name in enumerate(_db_stars_ids):
+            proj_pts[int(name)] = (int(proj_pts_all[idx][0]), int(proj_pts_all[idx][1]))
             
         found_names = []
-        # Draw connections for matched constellations
-        for cname, cinfo in CONSTELLATIONS_DB.items():
-            # Count stars belonging to this constellation that are in the frame
-            all_stars_in_constellation = list(set([s for conn in cinfo["conn"] for s in conn]))
+        for cname, conn_lines in _db_constellations.items():
+            all_stars_in_constellation = list(set([s for conn in conn_lines for s in conn]))
             visible_stars = 0
             for sname in all_stars_in_constellation:
                 if sname in proj_pts:
                     px, py = proj_pts[sname]
                     if 0 <= px < w and 0 <= py < h:
                         visible_stars += 1
-            
-            # Draw constellation if a significant portion is visible
+                        
             if visible_stars >= max(2, int(len(all_stars_in_constellation) * 0.5)):
                 found_names.append(cname)
-                # Draw connections
-                for s1, s2 in cinfo["conn"]:
+                # Draw lines
+                for s1, s2 in conn_lines:
                     if s1 in proj_pts and s2 in proj_pts:
                         cv2.line(out_img, proj_pts[s1], proj_pts[s2], (0, 255, 0), 2, lineType=cv2.LINE_AA)
-                # Draw labels for main stars of the constellation
+                # Draw small circles for visible stars of the constellation
                 for sname in all_stars_in_constellation:
                     if sname in proj_pts:
                         px, py = proj_pts[sname]
                         if 0 <= px < w and 0 <= py < h:
                             cv2.circle(out_img, (px, py), 4, (0, 0, 255), -1, lineType=cv2.LINE_AA)
-                            cv2.putText(out_img, sname.split("_")[0], (px + 8, py - 8), 
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1, lineType=cv2.LINE_AA)
-                                        
+                            
         if found_names:
             names_str = ", ".join(found_names)
             cv2.putText(out_img, f"Solved: {names_str}", (20, h - 30), 
