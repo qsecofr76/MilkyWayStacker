@@ -453,7 +453,7 @@ def find_constellation(stars, template_coords, connections, min_matches=4):
             pB = stars[b_idx]
             
             d_img = np.linalg.norm(pA - pB)
-            if d_img < 25.0:
+            if d_img < 100.0:
                 continue
                 
             pT0 = template_coords[0]
@@ -461,7 +461,7 @@ def find_constellation(stars, template_coords, connections, min_matches=4):
             d_temp = np.linalg.norm(pT0 - pT1)
             
             scale = d_img / d_temp
-            if scale < 30.0 or scale > 800.0:
+            if scale < 50.0 or scale > 800.0:
                 continue
                 
             vec_temp = pT1 - pT0
@@ -483,8 +483,8 @@ def find_constellation(stars, template_coords, connections, min_matches=4):
             
             matches_count = 0
             matched_indices = []
-            tolerance = scale * 0.15
-            tolerance = max(12.0, min(50.0, tolerance))
+            tolerance = scale * 0.05
+            tolerance = max(6.0, min(16.0, tolerance))
             
             for proj in projected_pts:
                 dists = np.linalg.norm(stars - proj, axis=1)
@@ -557,12 +557,6 @@ def draw_constellations(img, mask=None):
             "coords": np.float32([[0.0, 0.1], [0.0, 0.6], [0.0, -0.4], [-0.6, -0.1], [0.6, -0.1]]),
             "conn": [(1, 0), (0, 2), (0, 3), (0, 4)],
             "min": 5
-        },
-        {
-            "name": "Southern Cross (Crux)",
-            "coords": np.float32([[0.0, 0.7], [0.0, -0.7], [-0.4, 0.1], [0.4, 0.1]]),
-            "conn": [(0, 1), (2, 3)],
-            "min": 4
         },
         {
             "name": "Scorpius (Scorpione)",

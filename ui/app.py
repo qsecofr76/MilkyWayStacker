@@ -27,6 +27,7 @@ class MilkyWayStackerApp(ctk.CTk):
         self.original_reference_img = None
         self.reference_img = None
         self.output_img = None
+        self.show_constellations_var = ctk.BooleanVar(value=False)
 
         self._create_widgets()
         
@@ -176,12 +177,12 @@ class MilkyWayStackerApp(ctk.CTk):
         self.stack_btn = ctk.CTkButton(self.sidebar, text="Stack Images", fg_color="#2b8c44", hover_color="#1d662e", command=self.start_stacking)
         self.stack_btn.pack(fill="x", padx=20, pady=5)
 
-        self.constellation_btn = ctk.CTkButton(
-            self.sidebar, text="Overlay Constellations", 
-            fg_color="#00a896", hover_color="#028090", 
-            state="disabled", command=self.overlay_constellations
+        self.constellation_cb = ctk.CTkCheckBox(
+            self.sidebar, text="Show Constellations", 
+            state="disabled", variable=self.show_constellations_var, 
+            command=self.toggle_constellations
         )
-        self.constellation_btn.pack(fill="x", padx=20, pady=2)
+        self.constellation_cb.pack(fill="x", padx=20, pady=5)
 
         self.save_btn = ctk.CTkButton(self.sidebar, text="Save Result", fg_color="#1f538d", state="disabled", command=self.save_result)
         self.save_btn.pack(fill="x", padx=20, pady=2)
@@ -228,8 +229,9 @@ class MilkyWayStackerApp(ctk.CTk):
             self.reference_img = self.original_reference_img.copy()
             self.canvas.set_image(self.reference_img)
             self.status_label.configure(text=f"Loaded {len(self.image_paths)} images. Paint the sky mask on the reference frame, then click 'Stack Images'.")
-            self.constellation_btn.configure(state="disabled")
+            self.constellation_cb.configure(state="normal")
             self.save_btn.configure(state="disabled")
+            self.update_display_image()
         else:
             self.status_label.configure(text="Failed to load reference image.")
 
@@ -439,7 +441,7 @@ class MilkyWayStackerApp(ctk.CTk):
         self.stack_btn.configure(state="disabled")
         self.load_btn.configure(state="disabled")
         self.save_btn.configure(state="disabled")
-        self.constellation_btn.configure(state="disabled")
+        self.constellation_cb.configure(state="disabled")
         
         mode = self.stack_mode_menu.get()
         feather = int(self.feather_slider.get())
@@ -487,13 +489,13 @@ class MilkyWayStackerApp(ctk.CTk):
         
         # Hide the red mask overlay to display the clean stacked output
         self.canvas.show_mask = False
-        self.canvas.set_image(self.output_img, reset_mask=False)
         
         # Enable controls
         self.stack_btn.configure(state="normal")
         self.load_btn.configure(state="normal")
         self.save_btn.configure(state="normal")
-        self.constellation_btn.configure(state="normal")
+        self.constellation_cb.configure(state="normal")
+        self.update_display_image()
 
         # Show detailed popup report window
         report_win = ctk.CTkToplevel(self)
@@ -542,20 +544,25 @@ class MilkyWayStackerApp(ctk.CTk):
         self.stack_btn.configure(state="normal")
         self.load_btn.configure(state="normal")
 
-    def overlay_constellations(self):
-        if self.output_img is None:
+    def toggle_constellations(self):
+        self.update_display_image()
+
+    def update_display_image(self):
+        base_img = self.output_img if self.output_img is not None else self.reference_img
+        if base_img is None:
             return
-        
-        mask = self.canvas.get_mask()
-        annotated, found = draw_constellations(self.output_img, mask)
-        
-        if found:
-            self.output_img = annotated
-            self.canvas.set_image(self.output_img)
-            self.status_label.configure(text="Constellation outlines drawn successfully!")
-            messagebox.showinfo("Success", "Recognized and drew constellations (Cassiopeia, Ursa Major, or Orion)!")
+
+        if self.show_constellations_var.get():
+            mask = self.canvas.get_mask()
+            annotated, found = draw_constellations(base_img, mask)
+            self.canvas.set_image(annotated, reset_mask=False)
+            if found:
+                self.status_label.configure(text="Constellation outlines drawn successfully!")
+            else:
+                self.status_label.configure(text="No known constellations detected in the sky region.")
         else:
-            messagebox.showwarning("Not Found", "No constellations could be confidently identified in the sky region.")
+            self.canvas.set_image(base_img, reset_mask=False)
+            self.status_label.configure(text="Clean image displayed.")
 
     def save_result(self):
         if self.output_img is None:
