@@ -85,18 +85,20 @@ class MilkyWayStackerApp(ctk.CTk):
         self.mask_btns_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         self.mask_btns_frame.pack(fill="x", padx=20, pady=5)
 
-        self.save_mask_btn = ctk.CTkButton(self.mask_btns_frame, text="Save Mask", width=80, command=self.save_mask)
-        self.save_mask_btn.grid(row=0, column=0, padx=2, sticky="ew")
+        self.save_mask_btn = ctk.CTkButton(self.mask_btns_frame, text="Save Mask", command=self.save_mask)
+        self.save_mask_btn.grid(row=0, column=0, padx=2, pady=2, sticky="ew")
 
-        self.load_mask_btn = ctk.CTkButton(self.mask_btns_frame, text="Load Mask", width=80, command=self.load_mask)
-        self.load_mask_btn.grid(row=0, column=1, padx=2, sticky="ew")
+        self.load_mask_btn = ctk.CTkButton(self.mask_btns_frame, text="Load Mask", command=self.load_mask)
+        self.load_mask_btn.grid(row=0, column=1, padx=2, pady=2, sticky="ew")
 
-        self.clear_mask_btn = ctk.CTkButton(self.mask_btns_frame, text="Clear", width=60, fg_color="transparent", border_width=1, command=self.clear_mask)
-        self.clear_mask_btn.grid(row=0, column=2, padx=2, sticky="ew")
+        self.select_all_sky_btn = ctk.CTkButton(self.mask_btns_frame, text="Select All Sky", command=self.select_all_sky)
+        self.select_all_sky_btn.grid(row=1, column=0, padx=2, pady=2, sticky="ew")
+
+        self.clear_mask_btn = ctk.CTkButton(self.mask_btns_frame, text="Clear Mask", fg_color="transparent", border_width=1, command=self.clear_mask)
+        self.clear_mask_btn.grid(row=1, column=1, padx=2, pady=2, sticky="ew")
         
         self.mask_btns_frame.grid_columnconfigure(0, weight=1)
         self.mask_btns_frame.grid_columnconfigure(1, weight=1)
-        self.mask_btns_frame.grid_columnconfigure(2, weight=1)
 
         # Feature Detection Options
         self.features_label = ctk.CTkLabel(self.sidebar, text="Feature Detection Settings", font=ctk.CTkFont(size=14, weight="bold"))
@@ -259,6 +261,9 @@ class MilkyWayStackerApp(ctk.CTk):
 
     def clear_mask(self):
         self.canvas.clear_mask()
+
+    def select_all_sky(self):
+        self.canvas.fill_mask_sky()
 
     def save_mask(self):
         if self.reference_img is None:

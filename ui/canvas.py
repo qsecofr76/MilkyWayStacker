@@ -81,6 +81,14 @@ class MaskingCanvas(tk.Canvas):
             self.mask_draw = ImageDraw.Draw(self.mask_img)
             self.redraw()
 
+    def fill_mask_sky(self):
+        if self.original_cv_img is not None:
+            h, w, _ = self.original_cv_img.shape
+            self.mask_img = Image.new("L", (w, h), 255)
+            self.mask_draw = ImageDraw.Draw(self.mask_img)
+            self.show_mask = True
+            self.redraw()
+
     def get_mask(self):
         """Returns the mask as a numpy array matching the original image size."""
         if self.mask_img is None:
