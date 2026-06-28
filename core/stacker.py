@@ -14,9 +14,21 @@ def load_image(path):
         try:
             from astropy.io import fits
             with fits.open(path) as hdul:
-                data = hdul[0].data
+                # Find HDU with data
+                hdu = hdul[0]
+                data = hdu.data
                 if data is None and len(hdul) > 1:
-                    data = hdul[1].data
+                    hdu = hdul[1]
+                    data = hdu.data
+                
+                header = hdu.header
+                
+                # Check for Bayer pattern in header
+                bayer_pat = None
+                for key in ['BAYERPAT', 'BAYER', 'COLORTYP', 'DEBAYER']:
+                    if key in header:
+                        bayer_pat = str(header[key]).upper().strip()
+                        break
                 
                 # Normalize data to 0-255 range
                 data_min = data.min()
@@ -26,12 +38,36 @@ def load_image(path):
                 else:
                     normalized = np.zeros_like(data, dtype=np.uint8)
                 
-                if len(normalized.shape) == 2:
-                    return cv2.cvtColor(normalized, cv2.COLOR_GRAY2BGR)
-                elif len(normalized.shape) == 3:
+                # Handle 3D color FITS (typically channels, height, width or vice versa)
+                if len(normalized.shape) == 3:
                     if normalized.shape[0] in [3, 4]:
                         normalized = np.transpose(normalized, (1, 2, 0))
-                    return cv2.cvtColor(normalized, cv2.COLOR_RGB2BGR)
+                    if normalized.shape[2] == 3:
+                        return cv2.cvtColor(normalized, cv2.COLOR_RGB2BGR)
+                    elif normalized.shape[2] == 4:
+                        return cv2.cvtColor(normalized, cv2.COLOR_RGBA2BGR)
+                
+                # Handle 2D FITS (either Mono or Bayer Color raw)
+                if len(normalized.shape) == 2:
+                    if bayer_pat:
+                        code = None
+                        if 'RGGB' in bayer_pat:
+                            code = cv2.COLOR_BayerRG2BGR
+                        elif 'BGGR' in bayer_pat:
+                            code = cv2.COLOR_BayerBG2BGR
+                        elif 'GRBG' in bayer_pat:
+                            code = cv2.COLOR_BayerGR2BGR
+                        elif 'GBRG' in bayer_pat:
+                            code = cv2.COLOR_BayerGB2BGR
+                        
+                        if code is not None:
+                            try:
+                                return cv2.cvtColor(normalized, code)
+                            except Exception as db_err:
+                                print(f"Debayering FITS failed: {db_err}")
+                    
+                    # Fallback to monochrome converted to BGR
+                    return cv2.cvtColor(normalized, cv2.COLOR_GRAY2BGR)
         except Exception as e:
             print(f"Failed to load FITS file {path} with astropy: {e}")
             
