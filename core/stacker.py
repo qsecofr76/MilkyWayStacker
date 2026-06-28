@@ -71,7 +71,7 @@ def load_image(path):
         except Exception as e:
             print(f"Failed to load FITS file {path} with astropy: {e}")
             
-    elif ext == '.dng' or ext in ['.nef', '.cr2', '.arw', '.dcr']:
+    elif ext == '.dng' or ext in ['.nef', '.cr2', '.cr3', '.arw', '.dcr']:
         try:
             import rawpy
             with rawpy.imread(path) as raw:

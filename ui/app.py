@@ -207,7 +207,7 @@ class MilkyWayStackerApp(ctk.CTk):
     def load_images(self):
         files = filedialog.askopenfilenames(
             title="Select Images for Stacking",
-            filetypes=[("Image files", "*.jpg *.jpeg *.png *.tif *.tiff *.dng *.fit *.fits")]
+            filetypes=[("Image files", "*.jpg *.jpeg *.png *.tif *.tiff *.dng *.fit *.fits *.nef *.cr2 *.cr3 *.arw *.dcr")]
         )
         if not files:
             return
@@ -570,7 +570,7 @@ class MilkyWayStackerApp(ctk.CTk):
             self.constellation_cancel_event.set()
             self.constellation_cancel_event.clear()
             
-            self.status_label.configure(text="🔍 Solving sky coordinates (Bortle 3 catalog)... Please wait.")
+            self.status_label.configure(text="🔍 Solving sky coordinates (Bortle 4 catalog)... Please wait.")
             self.update_idletasks()
             
             def run_solve():
@@ -606,6 +606,12 @@ class MilkyWayStackerApp(ctk.CTk):
             filetypes=[("TIFF Image", "*.tiff *.tif"), ("PNG Image", "*.png"), ("JPEG Image", "*.jpg *.jpeg")]
         )
         if file_path:
-            cv2.imwrite(file_path, self.output_img)
+            img_to_save = self.output_img
+            if self.show_constellations_var.get():
+                mask = self.canvas.get_mask()
+                annotated, found = draw_constellations(self.output_img, mask)
+                if found:
+                    img_to_save = annotated
+            cv2.imwrite(file_path, img_to_save)
             self.status_label.configure(text=f"Saved stacked image to: {os.path.basename(file_path)}")
             messagebox.showinfo("Saved", "Image saved successfully.")

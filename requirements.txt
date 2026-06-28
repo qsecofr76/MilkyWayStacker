@@ -4,4 +4,4 @@ pillow
 customtkinter
 rawpy
 astropy
-
+astroalign

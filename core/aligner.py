@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import astroalign as aa
 import itertools
+import time
 
 def dilate_mask(mask, radius=30):
     """Dilates a binary mask to allow keypoint matching in slightly shifted frames."""
@@ -514,6 +515,8 @@ _db_stars_coords = None
 _db_stars_ids = None
 _db_stars_mags = None
 _db_constellations = None
+_db_to_cat_indices = None
+_db_triangles_angle0 = None
 
 def _gnomonic_project_vectorized(ra_deg_arr, dec_deg_arr, ra0_deg, dec0_deg):
     ra = np.radians(ra_deg_arr)
@@ -541,7 +544,8 @@ def _get_triangle_angles(p1, p2, p3):
         return None
 
 def _load_sky_catalog():
-    global _db_triangles, _db_stars_coords, _db_stars_ids, _db_stars_mags, _db_constellations
+    print("--- Aligner Module: Loading Sky Catalog v2.1 ---")
+    global _db_triangles, _db_stars_coords, _db_stars_ids, _db_stars_mags, _db_constellations, _db_to_cat_indices, _db_bright_cat_indices, _db_triangles_angle0
     if _db_stars_coords is not None:
         return
         
@@ -561,7 +565,7 @@ def _load_sky_catalog():
     
     for sid_str, info in stars_dict.items():
         vmag = info["vmag"]
-        if vmag <= 3.3: # Filter catalog to Bortle 3 stars only
+        if vmag <= 5.0: # Filter catalog to Bortle 5 stars only (clean, visual view)
             star_ids.append(int(sid_str))
             star_coords.append((info["ra"], info["dec"]))
             star_mags.append(vmag)
@@ -570,10 +574,21 @@ def _load_sky_catalog():
     _db_stars_coords = np.array(star_coords, dtype=np.float32)
     _db_stars_mags = np.array(star_mags, dtype=np.float32)
     
-    # Filter database stars for triangle matching (vmag <= 3.3 to optimize triangle counts)
-    mask_bright = _db_stars_mags <= 3.3
+    # Filter database stars for triangle matching (vmag <= 4.0 to optimize triangle counts to 12563)
+    mask_bright = _db_stars_mags <= 4.0
     db_pts_raw = _db_stars_coords[mask_bright]
+    db_ids_bright = _db_stars_ids[mask_bright]
     n_db = len(db_pts_raw)
+    
+    # Precompute mapping from solver database indices to catalog indices
+    db_to_cat_list = []
+    for idx in range(len(db_ids_bright)):
+        cat_idx = np.where(_db_stars_ids == db_ids_bright[idx])[0][0]
+        db_to_cat_list.append(cat_idx)
+    _db_to_cat_indices = np.array(db_to_cat_list, dtype=np.int32)
+    
+    # Precompute indices of top 25 brightest stars in the catalog
+    _db_bright_cat_indices = np.argsort(_db_stars_mags)[:25]
     
     max_dist = 20.0
     dist_matrix = np.zeros((n_db, n_db))
@@ -600,12 +615,25 @@ def _load_sky_catalog():
                 
                 angles = _get_triangle_angles(p1_xy[0], p1_xy[1], p1_xy[2])
                 if angles is not None:
+                    # Find 15 nearest database stars to the center of the triangle
+                    dists_to_center = np.linalg.norm(db_pts_raw - [ra0, dec0], axis=1)
+                    nearest_indices = np.argsort(dists_to_center)[:15]
+                    
+                    # Precompute the projected coordinates of the 15 nearest stars
+                    nearest_coords_raw = db_pts_raw[nearest_indices]
+                    nearest_coords_proj = _gnomonic_project_vectorized(nearest_coords_raw[:, 0], nearest_coords_raw[:, 1], ra0, dec0).astype(np.float32)
+                    
                     _db_triangles.append({
                         "angles": angles,
                         "db_indices": [i, j, k],
                         "ra0": ra0,
-                        "dec0": dec0
+                        "dec0": dec0,
+                        "nearest_coords_proj": nearest_coords_proj
                     })
+                    
+    # Sort database triangles by first angle to enable binary search
+    _db_triangles = sorted(_db_triangles, key=lambda x: x["angles"][0])
+    _db_triangles_angle0 = np.array([x["angles"][0] for x in _db_triangles], dtype=np.float32)
 
 import json
 import os
@@ -615,38 +643,44 @@ def draw_constellations(img, mask=None, cancel_event=None):
     Solves the starry sky using a local offline plate-solving engine (triangle-based hashing).
     Projects and overlays identified constellations onto the image canvas.
     """
+    print("--- Aligner Module: Starting Solve v2.1 ---")
+    t_start = time.time()
     _load_sky_catalog()
     if _db_stars_coords is None:
         return img.copy(), False
         
     eroded = erode_mask(mask, radius=15) if mask is not None else None
     
-    # Tune star detection locally to keep 10 <= len(stars) <= 28
+    # Safe contrast tuning loop to keep stars close to 30 without discarding key stars
     contrast = 0.04
     sigma = 1.6
     stars = detect_stars_centroids(img, eroded, contrast_threshold=contrast, sigma=sigma, max_stars=80)
     
-    if len(stars) > 28:
-        for attempt_contrast in [0.08, 0.12, 0.16, 0.20, 0.25, 0.30]:
-            stars = detect_stars_centroids(img, eroded, contrast_threshold=attempt_contrast, sigma=sigma, max_stars=80)
-            if len(stars) <= 28:
+    if len(stars) > 30:
+        for attempt_contrast in [0.05, 0.06]:
+            attempt_stars = detect_stars_centroids(img, eroded, contrast_threshold=attempt_contrast, sigma=sigma, max_stars=80)
+            if len(attempt_stars) < 30:
+                stars = attempt_stars
+                contrast = attempt_contrast
                 break
-    elif len(stars) < 10:
-        for attempt_contrast in [0.02, 0.01, 0.005]:
-            stars = detect_stars_centroids(img, eroded, contrast_threshold=attempt_contrast, sigma=sigma, max_stars=80)
-            if len(stars) >= 10:
-                break
+            stars = attempt_stars
+            contrast = attempt_contrast
                 
     if len(stars) < 4:
+        print(f"--- Aligner Module: Too few stars detected ({len(stars)}) ---")
         return img.copy(), False
         
-    # Only take top 18 stars for combinations to ensure extreme speed
-    candidate_stars = stars[:18]
+    # Only take top 15 stars for combinations to ensure extreme speed
+    candidate_stars = stars[:15]
     h, w, c = img.shape
     
-    # Filter database stars for triangle matching (vmag <= 3.3)
-    mask_bright = _db_stars_mags <= 3.3
+    # Filter database stars for triangle matching (vmag <= 4.0)
+    mask_bright = _db_stars_mags <= 4.0
     db_ids_bright = _db_stars_ids[mask_bright]
+    
+    print(f"--- Aligner Module: Precomputed triangles = {len(_db_triangles)} ---")
+    print(f"--- Aligner Module: Total stars in mask = {len(stars)} (contrast = {contrast}) ---")
+    print(f"--- Aligner Module: Candidate stars = {len(candidate_stars)} (combinations = {len(candidate_stars)*(len(candidate_stars)-1)*(len(candidate_stars)-2)//6}) ---")
     
     best_score = 0
     best_transform = None
@@ -667,29 +701,46 @@ def draw_constellations(img, mask=None, cancel_event=None):
                 
                 img_tri_pts = np.array([candidate_stars[i], candidate_stars[j], candidate_stars[k]], dtype=np.float32)
                 
-                for dbt in _db_triangles:
-                    if (abs(angles[0] - dbt["angles"][0]) < 1.5 and 
-                        abs(angles[1] - dbt["angles"][1]) < 1.5):
-                        
+                # Binary search to find matching database triangles (within 0.15 deg tolerance)
+                idx_start = np.searchsorted(_db_triangles_angle0, angles[0] - 0.15)
+                idx_end = np.searchsorted(_db_triangles_angle0, angles[0] + 0.15)
+                
+                for idx in range(idx_start, idx_end):
+                    dbt = _db_triangles[idx]
+                    if abs(angles[1] - dbt["angles"][1]) < 0.15:
                         db_idx = dbt["db_indices"]
                         ra0 = dbt["ra0"]
                         dec0 = dbt["dec0"]
                         
-                        # Project database stars locally (vectorized!)
-                        db_pts_proj = _gnomonic_project_vectorized(_db_stars_coords[:, 0], _db_stars_coords[:, 1], ra0, dec0).astype(np.float32)
-                        
-                        db_idx_in_all = [np.where(_db_stars_ids == db_ids_bright[idx])[0][0] for idx in db_idx]
-                        db_tri_pts = db_pts_proj[db_idx_in_all]
+                        # Project ONLY the 3 stars of the database triangle (extremely fast!)
+                        db_idx_in_all = _db_to_cat_indices[db_idx]
+                        db_tri_pts_raw = _db_stars_coords[db_idx_in_all]
+                        db_tri_pts = _gnomonic_project_vectorized(db_tri_pts_raw[:, 0], db_tri_pts_raw[:, 1], ra0, dec0).astype(np.float32)
                         
                         for p in perms:
                             ordered_db = db_tri_pts[list(p)]
                             M, _ = cv2.estimateAffinePartial2D(ordered_db, img_tri_pts)
                             if M is not None:
-                                # Conformal scale check to avoid verifying unphysical mappings
+                                # Conformal scale check to avoid verifying unphysical mappings (pixels per radian)
                                 scale = np.sqrt(M[0, 0]**2 + M[0, 1]**2)
-                                if scale < 0.1 or scale > 200.0:
+                                if scale < 1000.0 or scale > 80000.0:
                                     continue
                                     
+                                # Vectorized Micro-verification using preprojected coordinates of the 15 nearest database stars
+                                db_pts_proj_micro = dbt["nearest_coords_proj"]
+                                proj_micro = cv2.transform(np.expand_dims(db_pts_proj_micro, axis=0), M)[0]
+                                
+                                # Pairwise distance calculation using numpy broadcasting (extremely fast in C)
+                                diff = proj_micro[:, np.newaxis, :] - stars[np.newaxis, :, :] # shape (15, len(stars), 2)
+                                dists2 = np.sum(diff**2, axis=2) # shape (15, len(stars))
+                                min_dists2 = np.min(dists2, axis=1) # shape (15,)
+                                micro_match = np.sum(min_dists2 < 625.0) # 25^2 = 625
+                                        
+                                if micro_match < 5: # 3 triangle stars + at least 2 extra
+                                    continue
+                                    
+                                # Project all database stars ONLY when micro-verification passes
+                                db_pts_proj = _gnomonic_project_vectorized(_db_stars_coords[:, 0], _db_stars_coords[:, 1], ra0, dec0).astype(np.float32)
                                 proj = cv2.transform(np.expand_dims(db_pts_proj, axis=0), M)[0]
                                 
                                 # Enforce 1-to-1 matching constraint to prevent collapsed cluster bug
@@ -710,9 +761,34 @@ def draw_constellations(img, mask=None, cancel_event=None):
                                 
     out_img = img.copy()
     if best_transform is not None and best_score >= 5:
-        # Project all database stars to pixel space using the best projection center (vectorized!)
+        # Refine the initial 3-star partial affine transform using a Homography (8 DoF) fit on all matched stars
         db_pts_proj = _gnomonic_project_vectorized(_db_stars_coords[:, 0], _db_stars_coords[:, 1], best_ra0, best_dec0).astype(np.float32)
         proj_pts_all = cv2.transform(np.expand_dims(db_pts_proj, axis=0), best_transform)[0]
+        
+        matched_db_pts = []
+        matched_img_pts = []
+        matched_img_indices = set()
+        for idx, pt in enumerate(proj_pts_all):
+            dists = np.linalg.norm(stars - pt, axis=1)
+            min_idx = np.argmin(dists)
+            # Use a wide 120px threshold to capture perspective shifts at the edges
+            if dists[min_idx] < 120.0 and min_idx not in matched_img_indices:
+                matched_db_pts.append(db_pts_proj[idx])
+                matched_img_pts.append(stars[min_idx])
+                matched_img_indices.add(min_idx)
+                
+        H_refined = None
+        if len(matched_db_pts) >= 4:
+            matched_db_pts = np.array(matched_db_pts, dtype=np.float32)
+            matched_img_pts = np.array(matched_img_pts, dtype=np.float32)
+            H_refined, _ = cv2.findHomography(matched_db_pts, matched_img_pts, method=cv2.RANSAC, ransacReprojThreshold=8.0)
+            
+        if H_refined is not None:
+            # Re-project all catalog stars to pixel space using the refined Homography (perfect perspective matching!)
+            proj_pts_all = cv2.perspectiveTransform(np.expand_dims(db_pts_proj, axis=1), H_refined)[:, 0, :]
+        else:
+            # Fallback to the initial transform if homography estimation fails
+            proj_pts_all = cv2.transform(np.expand_dims(db_pts_proj, axis=0), best_transform)[0]
         
         proj_pts = {}
         for idx, name in enumerate(_db_stars_ids):
@@ -735,16 +811,31 @@ def draw_constellations(img, mask=None, cancel_event=None):
                     if s1 in proj_pts and s2 in proj_pts:
                         cv2.line(out_img, proj_pts[s1], proj_pts[s2], (0, 255, 0), 2, lineType=cv2.LINE_AA)
                 # Draw small circles for visible stars of the constellation
+                xs = []
+                ys = []
                 for sname in all_stars_in_constellation:
                     if sname in proj_pts:
                         px, py = proj_pts[sname]
                         if 0 <= px < w and 0 <= py < h:
                             cv2.circle(out_img, (px, py), 4, (0, 0, 255), -1, lineType=cv2.LINE_AA)
+                            xs.append(px)
+                            ys.append(py)
+                
+                # Draw constellation name next to its geometric center with drop shadow
+                if xs and ys:
+                    cx = int(np.mean(xs))
+                    cy = int(np.mean(ys))
+                    cv2.putText(out_img, cname, (cx + 10, cy - 10), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 4, lineType=cv2.LINE_AA)
+                    cv2.putText(out_img, cname, (cx + 10, cy - 10), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, lineType=cv2.LINE_AA)
                             
+        t_end = time.time()
         if found_names:
             names_str = ", ".join(found_names)
-            cv2.putText(out_img, f"Solved: {names_str}", (20, h - 30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, lineType=cv2.LINE_AA)
+            print(f"--- Aligner Module: SUCCESS! Solved: {names_str} (time: {t_end - t_start:.3f}s, best_score: {best_score}) ---")
             return out_img, True
             
+    t_end = time.time()
+    print(f"--- Aligner Module: FAILED to solve (time: {t_end - t_start:.3f}s, best_score: {best_score}) ---")
     return out_img, False
