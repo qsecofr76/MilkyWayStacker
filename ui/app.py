@@ -28,6 +28,8 @@ class MilkyWayStackerApp(ctk.CTk):
         self.reference_img = None
         self.output_img = None
         self.show_constellations_var = ctk.BooleanVar(value=False)
+        self.constellation_thread = None
+        self.constellation_cancel_event = threading.Event()
 
         self._create_widgets()
         
@@ -553,14 +555,33 @@ class MilkyWayStackerApp(ctk.CTk):
             return
 
         if self.show_constellations_var.get():
-            mask = self.canvas.get_mask()
-            annotated, found = draw_constellations(base_img, mask)
-            self.canvas.set_image(annotated, reset_mask=False)
-            if found:
-                self.status_label.configure(text="Constellation outlines drawn successfully!")
-            else:
-                self.status_label.configure(text="No known constellations detected in the sky region.")
+            # Signal cancel to any previous run
+            self.constellation_cancel_event.set()
+            self.constellation_cancel_event.clear()
+            
+            self.status_label.configure(text="🔍 Solving sky coordinates (Bortle 4 catalog)... Please wait.")
+            self.update_idletasks()
+            
+            def run_solve():
+                mask = self.canvas.get_mask()
+                annotated, found = draw_constellations(base_img, mask, self.constellation_cancel_event)
+                
+                if self.constellation_cancel_event.is_set():
+                    return
+                    
+                def apply_result():
+                    if self.show_constellations_var.get():
+                        self.canvas.set_image(annotated, reset_mask=False)
+                        if found:
+                            self.status_label.configure(text="Constellation outlines drawn successfully!")
+                        else:
+                            self.status_label.configure(text="No known constellations detected in the sky region.")
+                self.after(0, apply_result)
+                
+            self.constellation_thread = threading.Thread(target=run_solve, daemon=True)
+            self.constellation_thread.start()
         else:
+            self.constellation_cancel_event.set()
             self.canvas.set_image(base_img, reset_mask=False)
             self.status_label.configure(text="Clean image displayed.")
 

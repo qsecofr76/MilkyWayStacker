@@ -560,16 +560,18 @@ def _load_sky_catalog():
     star_mags = []
     
     for sid_str, info in stars_dict.items():
-        star_ids.append(int(sid_str))
-        star_coords.append((info["ra"], info["dec"]))
-        star_mags.append(info["vmag"])
+        vmag = info["vmag"]
+        if vmag <= 4.0: # Filter catalog to Bortle 4 stars only
+            star_ids.append(int(sid_str))
+            star_coords.append((info["ra"], info["dec"]))
+            star_mags.append(vmag)
         
     _db_stars_ids = np.array(star_ids, dtype=np.int32)
     _db_stars_coords = np.array(star_coords, dtype=np.float32)
     _db_stars_mags = np.array(star_mags, dtype=np.float32)
     
-    # Filter database stars for triangle matching (vmag <= 3.8 to optimize triangle counts)
-    mask_bright = _db_stars_mags <= 3.8
+    # Filter database stars for triangle matching (vmag <= 3.6 to optimize triangle counts)
+    mask_bright = _db_stars_mags <= 3.6
     db_pts_raw = _db_stars_coords[mask_bright]
     n_db = len(db_pts_raw)
     
@@ -610,7 +612,7 @@ def _load_sky_catalog():
 import json
 import os
 
-def draw_constellations(img, mask=None):
+def draw_constellations(img, mask=None, cancel_event=None):
     """
     Solves the starry sky using a local offline plate-solving engine (triangle-based hashing).
     Projects and overlays identified constellations onto the image canvas.
@@ -628,8 +630,8 @@ def draw_constellations(img, mask=None):
     candidate_stars = stars[:25]
     h, w, c = img.shape
     
-    # Filter database stars for triangle matching (vmag <= 3.8)
-    mask_bright = _db_stars_mags <= 3.8
+    # Filter database stars for triangle matching (vmag <= 3.6)
+    mask_bright = _db_stars_mags <= 3.6
     db_ids_bright = _db_stars_ids[mask_bright]
     
     best_score = 0
@@ -641,6 +643,8 @@ def draw_constellations(img, mask=None):
     
     # Try finding matching triangles
     for i in range(len(candidate_stars)):
+        if cancel_event is not None and cancel_event.is_set():
+            return img.copy(), False
         for j in range(i+1, len(candidate_stars)):
             for k in range(j+1, len(candidate_stars)):
                 angles = _get_triangle_angles(candidate_stars[i], candidate_stars[j], candidate_stars[k])
