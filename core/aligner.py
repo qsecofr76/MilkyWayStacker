@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import astroalign as aa
+import itertools
 
 def dilate_mask(mask, radius=30):
     """Dilates a binary mask to allow keypoint matching in slightly shifted frames."""
@@ -593,6 +594,7 @@ def draw_constellations(img, mask=None):
     
     best_score = 0
     best_transform = None
+    perms = list(itertools.permutations([0, 1, 2]))
     
     # Try finding matching triangles
     for i in range(len(candidate_stars)):
@@ -602,6 +604,8 @@ def draw_constellations(img, mask=None):
                 if angles is None:
                     continue
                 
+                img_tri_pts = np.array([candidate_stars[i], candidate_stars[j], candidate_stars[k]], dtype=np.float32)
+                
                 # Match angles against database triangles
                 for dbt in _db_triangles:
                     if (abs(angles[0] - dbt["angles"][0]) < 1.5 and 
@@ -609,37 +613,33 @@ def draw_constellations(img, mask=None):
                         
                         db_idx = dbt["indices"]
                         db_tri_pts = _db_pts[db_idx]
-                        img_tri_pts = np.array([candidate_stars[i], candidate_stars[j], candidate_stars[k]], dtype=np.float32)
                         
-                        # Establish one-to-one vertex correspondence by sorting by vertex angle size
-                        def sort_verts(pts):
-                            side_a = np.linalg.norm(pts[1] - pts[2])
-                            side_b = np.linalg.norm(pts[0] - pts[2])
-                            side_c = np.linalg.norm(pts[0] - pts[1])
-                            c0 = np.clip((side_b**2 + side_c**2 - side_a**2) / (2 * side_b * side_c), -1.0, 1.0)
-                            c1 = np.clip((side_a**2 + side_c**2 - side_b**2) / (2 * side_a * side_c), -1.0, 1.0)
-                            c2 = np.clip((side_a**2 + side_b**2 - side_c**2) / (2 * side_a * side_b), -1.0, 1.0)
-                            order = np.argsort([np.arccos(c0), np.arccos(c1), np.arccos(c2)])
-                            return pts[order]
-                        
-                        # Estimate full affine transform allowing reflections
-                        M, _ = cv2.estimateAffine2D(sort_verts(db_tri_pts), sort_verts(img_tri_pts))
-                        if M is not None:
-                            # Project all database stars
-                            proj = cv2.transform(np.expand_dims(_db_pts, axis=0), M)[0]
-                            # Count matching stars
-                            match_count = 0
-                            for p in proj:
-                                dists = np.linalg.norm(stars - p, axis=1)
-                                if np.any(dists < 30.0):
-                                    match_count += 1
-                                    
-                            if match_count > best_score:
-                                best_score = match_count
-                                best_transform = M
+                        # Test all 6 vertex mappings to resolve correspondence correctly
+                        for p in perms:
+                            ordered_db = db_tri_pts[list(p)]
+                            
+                            # Estimate similarity transform (translation, rotation, uniform scale)
+                            M, _ = cv2.estimateAffinePartial2D(ordered_db, img_tri_pts)
+                            if M is not None:
+                                # Project all database stars
+                                proj = cv2.transform(np.expand_dims(_db_pts, axis=0), M)[0]
+                                
+                                # Enforce 1-to-1 matching constraint to prevent collapsed cluster bug
+                                matched_img_indices = set()
+                                match_count = 0
+                                for pt in proj:
+                                    dists = np.linalg.norm(stars - pt, axis=1)
+                                    min_idx = np.argmin(dists)
+                                    if dists[min_idx] < 25.0 and min_idx not in matched_img_indices:
+                                        match_count += 1
+                                        matched_img_indices.add(min_idx)
+                                        
+                                if match_count > best_score:
+                                    best_score = match_count
+                                    best_transform = M
                                 
     out_img = img.copy()
-    if best_transform is not None and best_score >= 6:
+    if best_transform is not None and best_score >= 5:
         # Project all database stars to pixel space
         proj_pts = {}
         for idx, name in enumerate(_db_names):
