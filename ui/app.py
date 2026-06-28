@@ -8,7 +8,7 @@ import numpy as np
 from PIL import Image, ImageTk
 
 from ui.canvas import MaskingCanvas
-from core.stacker import stack_images, load_image
+from core.stacker import stack_images, load_image, apply_gamma
 from core.aligner import check_features, get_debug_matches_image, draw_constellations, get_debug_stars_image
 
 # Set CustomTkinter theme
@@ -24,6 +24,7 @@ class MilkyWayStackerApp(ctk.CTk):
         
         # State variables
         self.image_paths = []
+        self.original_reference_img = None
         self.reference_img = None
         self.output_img = None
 
@@ -114,6 +115,13 @@ class MilkyWayStackerApp(ctk.CTk):
         self.sigma_slider = ctk.CTkSlider(self.sidebar, from_=0.5, to=3.0, number_of_steps=25, command=self.change_sigma)
         self.sigma_slider.set(1.6)
         self.sigma_slider.pack(fill="x", padx=20, pady=2)
+
+        # Gamma Correction
+        self.gamma_label = ctk.CTkLabel(self.sidebar, text="Gamma Correction: 1.0\n(lower brightens, higher darkens)")
+        self.gamma_label.pack()
+        self.gamma_slider = ctk.CTkSlider(self.sidebar, from_=0.1, to=3.0, number_of_steps=29, command=self.change_gamma)
+        self.gamma_slider.set(1.0)
+        self.gamma_slider.pack(fill="x", padx=20, pady=2)
 
         # Stacking & Alignment Geometry Parameters
         self.params_label = ctk.CTkLabel(self.sidebar, text="Stacking & Alignment Geometry", font=ctk.CTkFont(size=14, weight="bold"))
@@ -213,8 +221,9 @@ class MilkyWayStackerApp(ctk.CTk):
         self.update_idletasks()
 
         self.canvas.show_mask = True
-        self.reference_img = load_image(ref_path)
-        if self.reference_img is not None:
+        self.original_reference_img = load_image(ref_path)
+        if self.original_reference_img is not None:
+            self.reference_img = self.original_reference_img.copy()
             self.canvas.set_image(self.reference_img)
             self.status_label.configure(text=f"Loaded {len(self.image_paths)} images. Paint the sky mask on the reference frame, then click 'Stack Images'.")
             self.constellation_btn.configure(state="disabled")
@@ -236,6 +245,13 @@ class MilkyWayStackerApp(ctk.CTk):
 
     def change_sigma(self, val):
         self.sigma_label.configure(text=f"Star Gaussian Blur (Sigma): {val:.1f}")
+
+    def change_gamma(self, val):
+        gamma = float(val)
+        self.gamma_label.configure(text=f"Gamma Correction: {gamma:.1f}\n(lower brightens, higher darkens)")
+        if self.original_reference_img is not None:
+            self.reference_img = apply_gamma(self.original_reference_img, gamma)
+            self.canvas.set_image(self.reference_img, reset_mask=False)
 
     def change_feather_radius(self, val):
         radius = int(val)
@@ -315,11 +331,13 @@ class MilkyWayStackerApp(ctk.CTk):
             messagebox.showwarning("Incomplete sequence", "Please load at least 2 images to compare and debug matching.")
             return
         
-        # Load second image to compare
+        # Load second image to compare and apply current gamma
+        gamma = float(self.gamma_slider.get())
         second_img = load_image(self.image_paths[1])
         if second_img is None:
             messagebox.showerror("Error", f"Failed to load second image: {self.image_paths[1]}")
             return
+        second_img = apply_gamma(second_img, gamma)
 
         mask = self.canvas.get_mask()
         contrast = float(self.contrast_slider.get())
@@ -354,12 +372,14 @@ class MilkyWayStackerApp(ctk.CTk):
                 choice_win.destroy()
                 return
             choice_win.destroy()
-            # Load first and last images to compare the maximum drift
+            # Load first and last images to compare the maximum drift and apply current gamma
             first_img = load_image(self.image_paths[0])
             last_img = load_image(self.image_paths[-1])
             if first_img is None or last_img is None:
                 messagebox.showerror("Error", "Failed to load first or last image in sequence.")
                 return
+            first_img = apply_gamma(first_img, gamma)
+            last_img = apply_gamma(last_img, gamma)
             self._show_debug_window(first_img, last_img, mask, False, contrast, sigma)
 
         def debug_detected_stars():
@@ -421,16 +441,17 @@ class MilkyWayStackerApp(ctk.CTk):
         mask = self.canvas.get_mask()
         contrast = float(self.contrast_slider.get())
         sigma = float(self.sigma_slider.get())
+        gamma = float(self.gamma_slider.get())
         transform = self.transform_menu.get()
         freeze_ground = self.freeze_ground_var.get()
 
         threading.Thread(
             target=self._stacking_thread, 
-            args=(mode, feather, mask, contrast, sigma, transform, freeze_ground), 
+            args=(mode, feather, mask, contrast, sigma, transform, freeze_ground, gamma), 
             daemon=True
         ).start()
 
-    def _stacking_thread(self, mode, feather, mask, contrast, sigma, transform, freeze_ground):
+    def _stacking_thread(self, mode, feather, mask, contrast, sigma, transform, freeze_ground, gamma):
         def update_progress(current, total, text):
             self.after(0, lambda: self.progress_bar.set(current / total))
             self.after(0, lambda: self.status_label.configure(text=text))
@@ -440,7 +461,7 @@ class MilkyWayStackerApp(ctk.CTk):
                 self.image_paths, mask=mask, 
                 stack_mode=mode, feather_radius=feather,
                 contrast_threshold=contrast, edge_threshold=10.0, sigma=sigma,
-                transform_type=transform, freeze_ground=freeze_ground,
+                transform_type=transform, freeze_ground=freeze_ground, gamma=gamma,
                 progress_callback=update_progress
             )
             

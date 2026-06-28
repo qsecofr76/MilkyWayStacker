@@ -46,6 +46,19 @@ def load_image(path):
             
     return cv2.imread(path)
 
+def apply_gamma(img, gamma=1.0):
+    """
+    Applies gamma correction to adjust image brightness.
+    gamma < 1.0 brightens shadows/midtones (ideal for dark FITS/RAW files).
+    gamma > 1.0 darkens shadows/midtones.
+    """
+    if img is None or abs(gamma - 1.0) < 0.01:
+        return img
+    # Build a lookup table (LUT)
+    inv_gamma = 1.0 / gamma
+    table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in range(256)]).astype("uint8")
+    return cv2.LUT(img, table)
+
 def feather_mask(mask, radius):
     """
     Feathers/blurs a binary mask to create smooth transitions.
@@ -61,7 +74,7 @@ def feather_mask(mask, radius):
 
 def stack_images(image_paths, mask=None, stack_mode='average', feather_radius=10, 
                  contrast_threshold=0.04, edge_threshold=10.0, sigma=1.6,
-                 transform_type="affine", freeze_ground=False, progress_callback=None):
+                 transform_type="affine", freeze_ground=False, gamma=1.0, progress_callback=None):
     """
     Stacks a list of images by separately aligning sky and ground, and then blending.
     Skips images where alignment fails and records the error details.
@@ -82,6 +95,8 @@ def stack_images(image_paths, mask=None, stack_mode='average', feather_radius=10
     ref_img = load_image(ref_path)
     if ref_img is None:
         raise ValueError(f"Could not load reference image: {ref_path}")
+        
+    ref_img = apply_gamma(ref_img, gamma)
     
     # If no mask is provided, treat the entire image as sky
     if mask is None:
@@ -116,6 +131,7 @@ def stack_images(image_paths, mask=None, stack_mode='average', feather_radius=10
         if img is None:
             failed_reports.append({"file": filename, "error": "Could not read image file."})
             continue
+        img = apply_gamma(img, gamma)
 
         frame_failed = False
         
