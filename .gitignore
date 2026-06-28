@@ -25,3 +25,6 @@ env/
 build/
 dist/
 *.spec
+
+# Test generator script
+generate_test_data.py

@@ -17,12 +17,15 @@ import PyInstaller.__main__
 ctk_path = os.path.dirname(customtkinter.__file__)
 print(f"CustomTkinter located at: {ctk_path}")
 
-# In Windows PyInstaller, add-data files are separated by a semicolon (;)
-# Syntax: "source_path;destination_relative_path"
-add_data_ctk = f"{ctk_path};customtkinter"
-add_data_logo = "logo.png;."
+# Detect platform separator for PyInstaller --add-data
+# Windows uses ';', Linux/macOS uses ':'
+sep = ';' if sys.platform.startswith('win') else ':'
 
-print("Starting compilation of standalone Windows executable...")
+add_data_ctk = f"{ctk_path}{sep}customtkinter"
+add_data_logo = f"logo.png{sep}."
+
+print(f"Using path separator '{sep}' for platform '{sys.platform}'")
+print("Starting compilation of standalone executable...")
 
 PyInstaller.__main__.run([
     'main.py',
@@ -38,5 +41,8 @@ PyInstaller.__main__.run([
 print("\n------------------------------------------------------------")
 print("SUCCESS: Compilation finished successfully!")
 print("You can find the single executable file at:")
-print(f" -> {os.path.abspath('dist/MilkyWayStacker.exe')}")
+if sys.platform.startswith('win'):
+    print(f" -> {os.path.abspath('dist/MilkyWayStacker.exe')}")
+else:
+    print(f" -> {os.path.abspath('dist/MilkyWayStacker')}")
 print("------------------------------------------------------------")

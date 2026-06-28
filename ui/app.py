@@ -19,7 +19,7 @@ class MilkyWayStackerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("Milky Way Stacker (Sequator Alternative)")
+        self.title("Milky Way Stacker")
         self.geometry("1200x950")
         
         # State variables
