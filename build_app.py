@@ -20,12 +20,9 @@ print(f"CustomTkinter located at: {ctk_path}")
 # Detect platform separator for PyInstaller --add-data
 # Windows uses ';', Linux/macOS uses ':'
 sep = ';' if sys.platform.startswith('win') else ':'
-
 add_data_ctk = f"{ctk_path}{sep}customtkinter"
 add_data_logo = f"logo.png{sep}."
-
-print(f"Using path separator '{sep}' for platform '{sys.platform}'")
-print("Starting compilation of standalone executable...")
+add_data_app_logo = f"app-150x150.png{sep}."
 
 PyInstaller.__main__.run([
     'main.py',
@@ -35,6 +32,7 @@ PyInstaller.__main__.run([
     '--icon=logo.ico',
     f'--add-data={add_data_ctk}',
     f'--add-data={add_data_logo}',
+    f'--add-data={add_data_app_logo}',
     f'--add-data=core{sep}core',
     '--clean',
     '--noconfirm'

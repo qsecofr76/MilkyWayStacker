@@ -1,4 +1,5 @@
 import os
+import sys
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -10,6 +11,16 @@ from PIL import Image, ImageTk
 from ui.canvas import MaskingCanvas
 from core.stacker import stack_images, load_image, apply_gamma
 from core.aligner import check_features, get_debug_matches_image, draw_constellations, get_debug_stars_image
+
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        # Resolve to project root (parent folder of ui/)
+        base_path = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+    return os.path.join(base_path, relative_path)
 
 # Set CustomTkinter theme
 ctk.set_appearance_mode("dark")
@@ -48,7 +59,7 @@ class MilkyWayStackerApp(ctk.CTk):
         self.sidebar.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=10, pady=10)
 
         # Load and display Association Logo (logo.png)
-        logo_path = "logo.png"
+        logo_path = resource_path("logo.png")
         if os.path.exists(logo_path):
             try:
                 logo_pil = Image.open(logo_path)
@@ -188,6 +199,17 @@ class MilkyWayStackerApp(ctk.CTk):
 
         self.save_btn = ctk.CTkButton(self.sidebar, text="Save Result", fg_color="#1f538d", state="disabled", command=self.save_result)
         self.save_btn.pack(fill="x", padx=20, pady=2)
+
+        # Load and display Astrophotography Association Logo (app-150x150.png) under execution buttons
+        app_logo_path = resource_path("app-150x150.png")
+        if os.path.exists(app_logo_path):
+            try:
+                app_logo_pil = Image.open(app_logo_path)
+                self.app_logo_image = ctk.CTkImage(light_image=app_logo_pil, dark_image=app_logo_pil, size=(120, 120))
+                self.app_logo_label = ctk.CTkLabel(self.sidebar, image=self.app_logo_image, text="")
+                self.app_logo_label.pack(pady=(20, 15))
+            except Exception as e:
+                print(f"Failed to load app-150x150.png: {e}")
 
         # --- Main Image Canvas ---
         self.canvas = MaskingCanvas(self, bg="#1a1a1a", highlightthickness=0)
