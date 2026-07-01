@@ -37,6 +37,38 @@ def align_single_frame(path, ref_img, mask, contrast_threshold, edge_threshold, 
     except Exception as e:
         return None, None, f"Alignment failed: {str(e)}"
 
+def sigma_clipped_mean(img_list, sigma_factor=2.5):
+    """
+    Stacks images by taking the mean of pixels that are NOT positive outliers
+    (e.g. bright satellite or airplane trails).
+    Uses MAD (Median Absolute Deviation) for robust outlier detection.
+    """
+    if len(img_list) < 3:
+        # Sigma clipping requires at least 3 frames to distinguish outliers from signal!
+        return np.mean(img_list, axis=0).astype(np.uint8)
+        
+    arr = np.stack(img_list, axis=0)  # Shape: (N, H, W, C)
+    med = np.median(arr, axis=0)      # Shape: (H, W, C)
+    
+    # Absolute deviation from median
+    abs_dev = np.abs(arr - med)       # Shape: (N, H, W, C)
+    mad = np.median(abs_dev, axis=0)  # Shape: (H, W, C)
+    
+    # Avoid division by zero and limit minimum noise threshold
+    mad = np.where(mad < 1.0, 1.0, mad)
+    
+    # Detect positive outliers (pixels significantly brighter than median)
+    threshold = sigma_factor * 1.4826 * mad
+    outlier_mask = (arr - med) > threshold  # Boolean array of shape (N, H, W, C)
+    
+    # Replace outliers with 0.0 for sum, and count valid pixels
+    masked_arr = np.where(outlier_mask, 0.0, arr)
+    valid_counts = np.sum(~outlier_mask, axis=0)
+    valid_counts = np.where(valid_counts < 1, 1, valid_counts)
+    
+    mean_img = np.sum(masked_arr, axis=0) / valid_counts
+    return np.clip(mean_img, 0, 255).astype(np.uint8)
+
 def load_image(path):
     """
     Robustly loads images supporting standard formats (JPG, PNG, TIFF)
@@ -144,7 +176,7 @@ def feather_mask(mask, radius):
 
 def stack_images(image_paths, mask=None, stack_mode='average', feather_radius=10, 
                  contrast_threshold=0.04, edge_threshold=10.0, sigma=1.6,
-                 transform_type="affine", freeze_ground=False, gamma=1.0, progress_callback=None, cancel_event=None):
+                 transform_type="affine", freeze_ground=False, gamma=1.0, progress_callback=None, cancel_event=None, remove_trails=False):
     """
     Stacks a list of images by separately aligning sky and ground, and then blending.
     Skips images where alignment fails and records the error details.
@@ -251,7 +283,9 @@ def stack_images(image_paths, mask=None, stack_mode='average', feather_radius=10
     if progress_callback:
         progress_callback(num_images, num_images, "Stacking sky frames...")
     
-    if stack_mode == 'median':
+    if remove_trails:
+        sky_stack = sigma_clipped_mean(valid_sky_list, sigma_factor=2.5)
+    elif stack_mode == 'median':
         sky_stack = np.median(valid_sky_list, axis=0).astype(np.uint8)
     else: # average
         sky_stack = np.mean(valid_sky_list, axis=0).astype(np.uint8)
@@ -264,7 +298,9 @@ def stack_images(image_paths, mask=None, stack_mode='average', feather_radius=10
         else:
             if progress_callback:
                 progress_callback(num_images, num_images, "Stacking ground frames...")
-            if stack_mode == 'median':
+            if remove_trails:
+                ground_stack = sigma_clipped_mean(valid_ground_list, sigma_factor=2.5)
+            elif stack_mode == 'median':
                 ground_stack = np.median(valid_ground_list, axis=0).astype(np.uint8)
             else:
                 ground_stack = np.mean(valid_ground_list, axis=0).astype(np.uint8)

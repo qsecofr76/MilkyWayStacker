@@ -170,6 +170,14 @@ class MilkyWayStackerApp(ctk.CTk):
         )
         self.freeze_ground_cb.pack(anchor="w", padx=20, pady=5)
 
+        # Remove Trails checkbox
+        self.remove_trails_var = ctk.BooleanVar(value=False)
+        self.remove_trails_cb = ctk.CTkCheckBox(
+            self.sidebar, text="Remove Satellite/Plane Trails", 
+            variable=self.remove_trails_var
+        )
+        self.remove_trails_cb.pack(anchor="w", padx=20, pady=5)
+
         self.feather_label = ctk.CTkLabel(self.sidebar, text="Feathering Radius: 10px")
         self.feather_label.pack()
         self.feather_slider = ctk.CTkSlider(self.sidebar, from_=0, to=250, number_of_steps=250, command=self.change_feather_radius)
@@ -488,14 +496,15 @@ class MilkyWayStackerApp(ctk.CTk):
         gamma = float(self.gamma_slider.get())
         transform = self.transform_menu.get()
         freeze_ground = self.freeze_ground_var.get()
+        remove_trails = self.remove_trails_var.get()
 
         threading.Thread(
             target=self._stacking_thread, 
-            args=(mode, feather, mask, contrast, sigma, transform, freeze_ground, gamma), 
+            args=(mode, feather, mask, contrast, sigma, transform, freeze_ground, gamma, remove_trails), 
             daemon=True
         ).start()
 
-    def _stacking_thread(self, mode, feather, mask, contrast, sigma, transform, freeze_ground, gamma):
+    def _stacking_thread(self, mode, feather, mask, contrast, sigma, transform, freeze_ground, gamma, remove_trails):
         def update_progress(current, total, text):
             self.after(0, lambda: self.progress_bar.set(current / total))
             self.after(0, lambda: self.status_label.configure(text=text))
@@ -506,7 +515,8 @@ class MilkyWayStackerApp(ctk.CTk):
                 stack_mode=mode, feather_radius=feather,
                 contrast_threshold=contrast, edge_threshold=10.0, sigma=sigma,
                 transform_type=transform, freeze_ground=freeze_ground, gamma=gamma,
-                progress_callback=update_progress, cancel_event=self.stacking_cancel_event
+                progress_callback=update_progress, cancel_event=self.stacking_cancel_event,
+                remove_trails=remove_trails
             )
             
             if stacked is not None:
