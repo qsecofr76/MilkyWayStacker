@@ -1,7 +1,41 @@
 import os
 import cv2
 import numpy as np
+import concurrent.futures
+import multiprocessing
 from core.aligner import detect_and_align
+
+def align_single_frame(path, ref_img, mask, contrast_threshold, edge_threshold, sigma, transform_type, freeze_ground, gamma):
+    try:
+        img = load_image(path)
+        if img is None:
+            return None, None, "Could not read image file."
+        img = apply_gamma(img, gamma)
+        
+        # 1. Align Sky
+        sky_warped, H_sky = detect_and_align(
+            ref_img, img, mask, align_sky=True,
+            contrast_threshold=contrast_threshold,
+            edge_threshold=edge_threshold,
+            sigma=sigma,
+            transform_type=transform_type
+        )
+        
+        # 2. Align Ground
+        ground_warped = None
+        has_ground = np.any(mask == 0)
+        if has_ground and not freeze_ground:
+            ground_warped, H_ground = detect_and_align(
+                ref_img, img, mask, align_sky=False,
+                contrast_threshold=contrast_threshold,
+                edge_threshold=edge_threshold,
+                sigma=sigma,
+                transform_type=transform_type
+            )
+            
+        return sky_warped, ground_warped, None
+    except Exception as e:
+        return None, None, f"Alignment failed: {str(e)}"
 
 def load_image(path):
     """
@@ -110,7 +144,7 @@ def feather_mask(mask, radius):
 
 def stack_images(image_paths, mask=None, stack_mode='average', feather_radius=10, 
                  contrast_threshold=0.04, edge_threshold=10.0, sigma=1.6,
-                 transform_type="affine", freeze_ground=False, gamma=1.0, progress_callback=None):
+                 transform_type="affine", freeze_ground=False, gamma=1.0, progress_callback=None, cancel_event=None):
     """
     Stacks a list of images by separately aligning sky and ground, and then blending.
     Skips images where alignment fails and records the error details.
@@ -137,7 +171,7 @@ def stack_images(image_paths, mask=None, stack_mode='average', feather_radius=10
     # If no mask is provided, treat the entire image as sky
     if mask is None:
         mask = np.ones((ref_img.shape[0], ref_img.shape[1]), dtype=np.uint8) * 255
- 
+  
     sky_list = []
     ground_list = []
     failed_reports = []
@@ -145,7 +179,6 @@ def stack_images(image_paths, mask=None, stack_mode='average', feather_radius=10
     has_ground = np.any(mask == 0)
  
     # Pre-populate lists to preserve indexing order
-    # (will fill them in the loop below)
     for i in range(num_images):
         sky_list.append(None)
         ground_list.append(None)
@@ -157,59 +190,56 @@ def stack_images(image_paths, mask=None, stack_mode='average', feather_radius=10
     if progress_callback:
         progress_callback(1, num_images, f"Selected middle frame as reference: {os.path.basename(ref_path)}")
  
-    for i in range(num_images):
-        if i == ref_idx:
-            continue
-            
-        path = image_paths[i]
-        filename = os.path.basename(path)
-        img = load_image(path)
-        if img is None:
-            failed_reports.append({"file": filename, "error": "Could not read image file."})
-            continue
-        img = apply_gamma(img, gamma)
+    futures = {}
+    max_workers = min(4, max(1, multiprocessing.cpu_count() - 1))
+    
+    if progress_callback:
+        progress_callback(1, num_images, f"Spawning parallel alignment workers (cores used: {max_workers})...")
 
-        frame_failed = False
-        
-        # 1. Align Sky
-        if progress_callback:
-            progress_callback(i + 1, num_images, f"Aligning sky for frame {i+1}/{num_images} ({filename})...")
-        
-        try:
-            sky_warped, H_sky = detect_and_align(
-                ref_img, img, mask, align_sky=True,
-                contrast_threshold=contrast_threshold,
-                edge_threshold=edge_threshold,
-                sigma=sigma,
-                transform_type=transform_type
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        for i in range(num_images):
+            if i == ref_idx:
+                continue
+                
+            path = image_paths[i]
+            future = executor.submit(
+                align_single_frame,
+                path, ref_img, mask,
+                contrast_threshold, edge_threshold, sigma,
+                transform_type, freeze_ground, gamma
             )
-            sky_list[i] = sky_warped.astype(np.float32)
-        except Exception as e:
-            failed_reports.append({"file": filename, "error": f"Sky alignment failed: {str(e)}"})
-            frame_failed = True
-
-        # 2. Align Ground (only if ground is NOT frozen and there is a ground region)
-        if not frame_failed and has_ground:
-            if freeze_ground:
-                # Ground is frozen; do not compute alignment or warp for target frames
-                pass
-            else:
+            futures[future] = (i, path)
+            
+        completed_count = 0
+        total_to_process = num_images - 1
+        
+        for future in concurrent.futures.as_completed(futures.keys()):
+            if cancel_event is not None and cancel_event.is_set():
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise InterruptedError("Stacking cancelled by user.")
+                
+            idx, path = futures[future]
+            filename = os.path.basename(path)
+            completed_count += 1
+            
+            try:
+                sky_warped, ground_warped, err_msg = future.result()
+                if err_msg:
+                    failed_reports.append({"file": filename, "error": err_msg})
+                    if progress_callback:
+                        progress_callback(completed_count + 1, num_images, f"Frame {completed_count}/{total_to_process} finished: {filename} (Failed: {err_msg})")
+                else:
+                    if sky_warped is not None:
+                        sky_list[idx] = sky_warped.astype(np.float32)
+                    if ground_warped is not None:
+                        ground_list[idx] = ground_warped.astype(np.float32)
+                        
+                    if progress_callback:
+                        progress_callback(completed_count + 1, num_images, f"Frame {completed_count}/{total_to_process} finished: {filename} (Aligned Sky/Ground successfully)")
+            except Exception as e:
+                failed_reports.append({"file": filename, "error": f"Process error: {str(e)}"})
                 if progress_callback:
-                    progress_callback(i + 1, num_images, f"Aligning ground for frame {i+1}/{num_images} ({filename})...")
-                try:
-                    ground_warped, H_ground = detect_and_align(
-                        ref_img, img, mask, align_sky=False,
-                        contrast_threshold=contrast_threshold,
-                        edge_threshold=edge_threshold,
-                        sigma=sigma,
-                        transform_type=transform_type
-                    )
-                    ground_list[i] = ground_warped.astype(np.float32)
-                except Exception as e:
-                    failed_reports.append({"file": filename, "error": f"Landscape alignment failed: {str(e)}"})
-                    # If ground alignment fails, we remove the corresponding sky warp we just added
-                    sky_list[i] = None
-                    frame_failed = True
+                    progress_callback(completed_count + 1, num_images, f"Frame {completed_count}/{total_to_process} finished: {filename} (Failed: {str(e)})")
 
     # Filter out None values (failed frames)
     valid_sky_list = [img for img in sky_list if img is not None]

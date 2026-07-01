@@ -41,6 +41,8 @@ class MilkyWayStackerApp(ctk.CTk):
         self.show_constellations_var = ctk.BooleanVar(value=False)
         self.constellation_thread = None
         self.constellation_cancel_event = threading.Event()
+        self.stacking_cancel_event = threading.Event()
+        self.is_stacking = False
 
         self._create_widgets()
         
@@ -461,8 +463,19 @@ class MilkyWayStackerApp(ctk.CTk):
             messagebox.showwarning("No Images", "Please load images first.")
             return
 
-        # Start stacking in background thread to prevent UI freezing
-        self.stack_btn.configure(state="disabled")
+        if self.is_stacking:
+            # Cancel current run
+            self.status_label.configure(text="Cancelling stacking... Please wait.")
+            self.stack_btn.configure(text="Cancelling...", state="disabled")
+            self.stacking_cancel_event.set()
+            return
+
+        # Start stacking
+        self.is_stacking = True
+        self.stacking_cancel_event.clear()
+        
+        # Configure button as "Cancel Stacking"
+        self.stack_btn.configure(text="Cancel Stacking", fg_color="#d62828", hover_color="#b22222")
         self.load_btn.configure(state="disabled")
         self.save_btn.configure(state="disabled")
         self.constellation_cb.configure(state="disabled")
@@ -493,7 +506,7 @@ class MilkyWayStackerApp(ctk.CTk):
                 stack_mode=mode, feather_radius=feather,
                 contrast_threshold=contrast, edge_threshold=10.0, sigma=sigma,
                 transform_type=transform, freeze_ground=freeze_ground, gamma=gamma,
-                progress_callback=update_progress
+                progress_callback=update_progress, cancel_event=self.stacking_cancel_event
             )
             
             if stacked is not None:
@@ -502,10 +515,16 @@ class MilkyWayStackerApp(ctk.CTk):
             else:
                 self.after(0, lambda: self.status_label.configure(text="Stacking failed."))
                 self.after(0, self._reset_ui_buttons)
+        except InterruptedError:
+            self.after(0, lambda: self.status_label.configure(text="Stacking cancelled by user."))
+            self.after(0, lambda: messagebox.showinfo("Cancelled", "Stacking process has been cancelled."))
+            self.after(0, self._reset_ui_buttons)
         except Exception as e:
             self.after(0, lambda: messagebox.showerror("Error", f"An error occurred: {str(e)}"))
             self.after(0, lambda: self.status_label.configure(text="Stacking error occurred."))
             self.after(0, self._reset_ui_buttons)
+        finally:
+            self.is_stacking = False
 
     def _on_stacking_complete(self, success_count, failed_reports):
         self.status_label.configure(text=f"Stacking completed. {success_count} images stacked successfully.")
@@ -515,7 +534,7 @@ class MilkyWayStackerApp(ctk.CTk):
         self.canvas.show_mask = False
         
         # Enable controls
-        self.stack_btn.configure(state="normal")
+        self.stack_btn.configure(text="Stack Images", fg_color="#2b8c44", hover_color="#1d662e", state="normal")
         self.load_btn.configure(state="normal")
         self.save_btn.configure(state="normal")
         self.constellation_cb.configure(state="normal")
@@ -565,7 +584,7 @@ class MilkyWayStackerApp(ctk.CTk):
         close_btn.pack(pady=15)
 
     def _reset_ui_buttons(self):
-        self.stack_btn.configure(state="normal")
+        self.stack_btn.configure(text="Stack Images", fg_color="#2b8c44", hover_color="#1d662e", state="normal")
         self.load_btn.configure(state="normal")
 
     def toggle_constellations(self):

@@ -98,7 +98,7 @@ class MaskingCanvas(tk.Canvas):
     def on_resize(self, event):
         self.redraw()
 
-    def redraw(self):
+    def redraw(self, update_bg=True):
         if self.original_cv_img is None:
             self.delete("all")
             self.create_text(
@@ -132,33 +132,29 @@ class MaskingCanvas(tk.Canvas):
         self.offset_x = (canvas_w - disp_w) // 2
         self.offset_y = (canvas_h - disp_h) // 2
 
-        # Convert OpenCV BGR to PIL RGB
-        rgb_img = cv2.cvtColor(self.original_cv_img, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(rgb_img)
-
-        # Resize background image
-        resized_img = pil_img.resize((disp_w, disp_h), Image.Resampling.LANCZOS)
+        # Only resize the background image when requested or when size changes (highly optimized!)
+        if update_bg or not hasattr(self, "resized_bg_pil") or self.resized_bg_pil is None or self.resized_bg_pil.size != (disp_w, disp_h):
+            # Convert OpenCV BGR to PIL RGB
+            rgb_img = cv2.cvtColor(self.original_cv_img, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(rgb_img)
+            self.resized_bg_pil = pil_img.resize((disp_w, disp_h), Image.Resampling.LANCZOS)
 
         # Create overlay for the mask if enabled
         if self.show_mask:
-            # Resize mask image
+            # Resize mask image (NEAREST is extremely fast)
             resized_mask = self.mask_img.resize((disp_w, disp_h), Image.Resampling.NEAREST)
             
             # Colorize the mask (Red overlay for sky, semi-transparent)
-            overlay = Image.new("RGBA", (disp_w, disp_h), (0, 0, 0, 0))
-            overlay_draw = ImageDraw.Draw(overlay)
-            
             mask_np = np.array(resized_mask)
-            # Red where sky is drawn (mask == 255)
             overlay_data = np.zeros((disp_h, disp_w, 4), dtype=np.uint8)
             overlay_data[mask_np == 255] = [255, 0, 0, 100]  # Red overlay with alpha=100
             
             overlay = Image.fromarray(overlay_data, "RGBA")
             
             # Composite background and overlay
-            composite = Image.alpha_composite(resized_img.convert("RGBA"), overlay)
+            composite = Image.alpha_composite(self.resized_bg_pil.convert("RGBA"), overlay)
         else:
-            composite = resized_img.convert("RGBA")
+            composite = self.resized_bg_pil.convert("RGBA")
             
         self.tk_image = ImageTk.PhotoImage(composite)
         self.create_image(self.offset_x, self.offset_y, anchor="nw", image=self.tk_image)
@@ -201,7 +197,8 @@ class MaskingCanvas(tk.Canvas):
                 fill=val
             )
             
-            self.redraw()
+            # Call redraw with update_bg=False to avoid expensive LANCZOS resizing (smooth drag!)
+            self.redraw(update_bg=False)
             self.draw_brush_cursor(event)
 
     def on_mouse_wheel(self, event):
