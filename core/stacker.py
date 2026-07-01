@@ -7,33 +7,43 @@ from core.aligner import detect_and_align
 
 def align_single_frame(path, ref_img, mask, contrast_threshold, edge_threshold, sigma, transform_type, freeze_ground, gamma):
     try:
-        img = load_image(path)
-        if img is None:
+        img_raw = load_image(path)
+        if img_raw is None:
             return None, None, "Could not read image file."
-        img = apply_gamma(img, gamma)
+        
+        img_for_align = apply_gamma(img_raw, gamma)
+        h, w, c = img_raw.shape
         
         # 1. Align Sky
-        sky_warped, H_sky = detect_and_align(
-            ref_img, img, mask, align_sky=True,
+        _, H_sky = detect_and_align(
+            ref_img, img_for_align, mask, align_sky=True,
             contrast_threshold=contrast_threshold,
             edge_threshold=edge_threshold,
             sigma=sigma,
             transform_type=transform_type
         )
+        if H_sky.shape == (2, 3):
+            sky_warped_raw = cv2.warpAffine(img_raw, H_sky, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+        else:
+            sky_warped_raw = cv2.warpPerspective(img_raw, H_sky, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
         
         # 2. Align Ground
-        ground_warped = None
+        ground_warped_raw = None
         has_ground = np.any(mask == 0)
         if has_ground and not freeze_ground:
-            ground_warped, H_ground = detect_and_align(
-                ref_img, img, mask, align_sky=False,
+            _, H_ground = detect_and_align(
+                ref_img, img_for_align, mask, align_sky=False,
                 contrast_threshold=contrast_threshold,
                 edge_threshold=edge_threshold,
                 sigma=sigma,
                 transform_type=transform_type
             )
+            if H_ground.shape == (2, 3):
+                ground_warped_raw = cv2.warpAffine(img_raw, H_ground, (w, h), flags=cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_REFLECT)
+            else:
+                ground_warped_raw = cv2.warpPerspective(img_raw, H_ground, (w, h), flags=cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_REFLECT)
             
-        return sky_warped, ground_warped, None
+        return sky_warped_raw, ground_warped_raw, None
     except Exception as e:
         return None, None, f"Alignment failed: {str(e)}"
 
@@ -196,20 +206,40 @@ def apply_gamma(img, gamma=1.0):
 
 def feather_mask(mask, radius):
     """
-    Feathers/blurs a binary mask to create smooth transitions.
-    radius: blur radius in pixels.
+    Feathers/blurs a binary mask to create smooth, progressive transitions.
+    Optimized using downsampling for large blur radii to prevent lag and enhance smoothness.
     """
     if radius <= 0:
         return mask.astype(np.float32) / 255.0
-    
-    # Ensure radius is odd
+        
+    h, w = mask.shape[:2]
+    # If the radius is large or the mask is huge, blur a downscaled version and upscale it.
+    # The bilinear upscaling creates an even softer, more progressive gradient.
+    if radius > 30 or max(h, w) > 2000:
+        scale = 1000.0 / max(h, w)
+        if scale < 1.0:
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            small_mask = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            
+            # Scale the radius down correspondingly
+            scaled_radius = max(1, int(radius * scale))
+            ksize = int(scaled_radius * 2) + 1
+            blurred_small = cv2.GaussianBlur(small_mask, (ksize, ksize), 0)
+            
+            # Upscale back to original size using bilinear interpolation
+            blurred = cv2.resize(blurred_small, (w, h), interpolation=cv2.INTER_LINEAR)
+            return blurred.astype(np.float32) / 255.0
+
+    # Fallback for small sizes / small radii
     ksize = int(radius * 2) + 1
     blurred = cv2.GaussianBlur(mask, (ksize, ksize), 0)
     return blurred.astype(np.float32) / 255.0
 
 def stack_images(image_paths, mask=None, stack_mode='average', feather_radius=10, 
                  contrast_threshold=0.04, edge_threshold=10.0, sigma=1.6,
-                 transform_type="affine", freeze_ground=False, gamma=1.0, progress_callback=None, cancel_event=None, remove_trails=False):
+                 transform_type="affine", freeze_ground=False, gamma_sky=1.0, gamma_ground=1.0,
+                 progress_callback=None, cancel_event=None, remove_trails=False):
     """
     Stacks a list of images by separately aligning sky and ground, and then blending.
     Skips images where alignment fails and records the error details.
@@ -218,7 +248,7 @@ def stack_images(image_paths, mask=None, stack_mode='average', feather_radius=10
     
     freeze_ground: if True, skips ground stacking and uses the landscape from the reference frame.
     
-    Returns: (final_image, success_count, failed_reports)
+    Returns: (final_image, success_count, failed_reports, sky_stack, ground_stack)
     """
     num_images = len(image_paths)
     if num_images == 0:
@@ -227,15 +257,15 @@ def stack_images(image_paths, mask=None, stack_mode='average', feather_radius=10
     # Choose the middle frame as reference to reduce coordinate warp distortion
     ref_idx = num_images // 2
     ref_path = image_paths[ref_idx]
-    ref_img = load_image(ref_path)
-    if ref_img is None:
+    ref_img_raw = load_image(ref_path)
+    if ref_img_raw is None:
         raise ValueError(f"Could not load reference image: {ref_path}")
         
-    ref_img = apply_gamma(ref_img, gamma)
+    ref_img_for_align = apply_gamma(ref_img_raw, gamma_sky)
     
     # If no mask is provided, treat the entire image as sky
     if mask is None:
-        mask = np.ones((ref_img.shape[0], ref_img.shape[1]), dtype=np.uint8) * 255
+        mask = np.ones((ref_img_raw.shape[0], ref_img_raw.shape[1]), dtype=np.uint8) * 255
   
     sky_list = []
     ground_list = []
@@ -248,9 +278,9 @@ def stack_images(image_paths, mask=None, stack_mode='average', feather_radius=10
         sky_list.append(None)
         ground_list.append(None)
  
-    # Insert reference frame directly
-    sky_list[ref_idx] = ref_img.astype(np.float32)
-    ground_list[ref_idx] = ref_img.astype(np.float32)
+    # Insert reference frame directly (uncorrected)
+    sky_list[ref_idx] = ref_img_raw.astype(np.float32)
+    ground_list[ref_idx] = ref_img_raw.astype(np.float32)
  
     if progress_callback:
         progress_callback(1, num_images, f"Selected middle frame as reference: {os.path.basename(ref_path)}")
@@ -269,9 +299,9 @@ def stack_images(image_paths, mask=None, stack_mode='average', feather_radius=10
             path = image_paths[i]
             future = executor.submit(
                 align_single_frame,
-                path, ref_img, mask,
+                path, ref_img_for_align, mask,
                 contrast_threshold, edge_threshold, sigma,
-                transform_type, freeze_ground, gamma
+                transform_type, freeze_ground, gamma_sky
             )
             futures[future] = (i, path)
             
@@ -321,8 +351,8 @@ def stack_images(image_paths, mask=None, stack_mode='average', feather_radius=10
     # 4. Stack Ground
     if has_ground:
         if freeze_ground:
-            # Tack-sharp single exposure landscape from reference frame
-            ground_stack = ref_img
+            # Tack-sharp single exposure landscape from reference frame (uncorrected)
+            ground_stack = ref_img_raw
         else:
             if progress_callback:
                 progress_callback(num_images, num_images, "Stacking ground frames...")
@@ -330,16 +360,19 @@ def stack_images(image_paths, mask=None, stack_mode='average', feather_radius=10
     else:
         ground_stack = sky_stack
 
-    # 5. Composite Sky and Ground
+    # 5. Composite Sky and Ground (apply gamma corrections separately to sky and ground stacks)
     if progress_callback:
         progress_callback(num_images, num_images, "Blending sky and ground...")
+    
+    sky_stack_gamma = apply_gamma(sky_stack, gamma_sky)
+    ground_stack_gamma = apply_gamma(ground_stack, gamma_ground)
     
     f_mask = feather_mask(mask, feather_radius)
     f_mask_3d = np.expand_dims(f_mask, axis=2)
 
-    final_img = (sky_stack.astype(np.float32) * f_mask_3d + 
-                 ground_stack.astype(np.float32) * (1.0 - f_mask_3d))
+    final_img = (sky_stack_gamma.astype(np.float32) * f_mask_3d + 
+                 ground_stack_gamma.astype(np.float32) * (1.0 - f_mask_3d))
     
     final_img = np.clip(final_img, 0, 255).astype(np.uint8)
 
-    return final_img, success_count, failed_reports
+    return final_img, success_count, failed_reports, sky_stack, ground_stack

@@ -54,6 +54,7 @@ class MaskingCanvas(tk.Canvas):
     def set_image(self, cv_img, reset_mask=True):
         """Loads a new reference image and optionally resets the mask."""
         self.original_cv_img = cv_img
+        self.display_cv_img = cv_img
         h, w, _ = cv_img.shape
         
         if reset_mask or self.mask_img is None:
@@ -99,7 +100,11 @@ class MaskingCanvas(tk.Canvas):
         self.redraw()
 
     def redraw(self, update_bg=True):
-        if self.original_cv_img is None:
+        target_img = getattr(self, "display_cv_img", None)
+        if target_img is None:
+            target_img = self.original_cv_img
+            
+        if target_img is None:
             self.delete("all")
             self.create_text(
                 self.winfo_width() / 2, self.winfo_height() / 2,
@@ -117,7 +122,7 @@ class MaskingCanvas(tk.Canvas):
             return
 
         # Original image dimensions
-        img_h, img_w, _ = self.original_cv_img.shape
+        img_h, img_w, _ = target_img.shape
 
         # Calculate scale factor to fit canvas
         scale_w = canvas_w / img_w
@@ -135,7 +140,7 @@ class MaskingCanvas(tk.Canvas):
         # Only resize the background image when requested or when size changes (highly optimized!)
         if update_bg or not hasattr(self, "resized_bg_pil") or self.resized_bg_pil is None or self.resized_bg_pil.size != (disp_w, disp_h):
             # Convert OpenCV BGR to PIL RGB
-            rgb_img = cv2.cvtColor(self.original_cv_img, cv2.COLOR_BGR2RGB)
+            rgb_img = cv2.cvtColor(target_img, cv2.COLOR_BGR2RGB)
             pil_img = Image.fromarray(rgb_img)
             self.resized_bg_pil = pil_img.resize((disp_w, disp_h), Image.Resampling.LANCZOS)
 

@@ -10,9 +10,29 @@ def dilate_mask(mask, radius=30):
     return cv2.dilate(mask, kernel)
 
 def erode_mask(mask, radius=25):
-    """Erodes a binary mask to create an exclusion zone along the mask boundary."""
+    """
+    Erodes a binary mask to create an exclusion zone along the mask boundary.
+    Optimized using downsampling for large erosion radii to keep performance ultra-fast.
+    """
     if mask is None or radius <= 0:
         return mask
+        
+    h, w = mask.shape[:2]
+    # If the radius is large or the mask is huge, erode a downscaled version and upscale it.
+    if radius > 15 or max(h, w) > 2000:
+        scale = 800.0 / max(h, w)
+        if scale < 1.0:
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            small_mask = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            
+            scaled_radius = max(1, int(radius * scale))
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (scaled_radius * 2 + 1, scaled_radius * 2 + 1))
+            eroded_small = cv2.erode(small_mask, kernel)
+            
+            # Upscale back to original size (INTER_NEAREST is perfect for binary masks)
+            return cv2.resize(eroded_small, (w, h), interpolation=cv2.INTER_NEAREST)
+
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
     return cv2.erode(mask, kernel)
 

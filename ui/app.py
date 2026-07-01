@@ -9,7 +9,7 @@ import numpy as np
 from PIL import Image, ImageTk
 
 from ui.canvas import MaskingCanvas
-from core.stacker import stack_images, load_image, apply_gamma
+from core.stacker import stack_images, load_image, apply_gamma, feather_mask
 from core.aligner import check_features, get_debug_matches_image, draw_constellations, get_debug_stars_image
 
 def resource_path(relative_path):
@@ -21,6 +21,17 @@ def resource_path(relative_path):
         # Resolve to project root (parent folder of ui/)
         base_path = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
     return os.path.join(base_path, relative_path)
+
+def resize_to_preview(img, max_dim=1200):
+    if img is None:
+        return None
+    h, w = img.shape[:2]
+    if max(h, w) <= max_dim:
+        return img.copy()
+    scale = max_dim / max(h, w)
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+    return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
 # Set CustomTkinter theme
 ctk.set_appearance_mode("dark")
@@ -38,6 +49,11 @@ class MilkyWayStackerApp(ctk.CTk):
         self.original_reference_img = None
         self.reference_img = None
         self.output_img = None
+        self.sky_stack_raw = None
+        self.ground_stack_raw = None
+        self.ref_img_preview = None
+        self.sky_stack_preview = None
+        self.ground_stack_preview = None
         self.show_constellations_var = ctk.BooleanVar(value=False)
         self.constellation_thread = None
         self.constellation_cancel_event = threading.Event()
@@ -116,6 +132,10 @@ class MilkyWayStackerApp(ctk.CTk):
         self.mask_btns_frame.grid_columnconfigure(0, weight=1)
         self.mask_btns_frame.grid_columnconfigure(1, weight=1)
 
+        # Toggle Mask Button
+        self.toggle_mask_btn = ctk.CTkButton(self.sidebar, text="Hide Sky Mask", fg_color="#4a4a4a", hover_color="#5a5a5a", command=self.toggle_mask_visibility)
+        self.toggle_mask_btn.pack(fill="x", padx=20, pady=5)
+
         # Feature Detection Options
         self.features_label = ctk.CTkLabel(self.sidebar, text="Feature Detection Settings", font=ctk.CTkFont(size=14, weight="bold"))
         self.features_label.pack(pady=(15, 2))
@@ -134,12 +154,21 @@ class MilkyWayStackerApp(ctk.CTk):
         self.sigma_slider.set(1.6)
         self.sigma_slider.pack(fill="x", padx=20, pady=2)
 
-        # Gamma Correction
-        self.gamma_label = ctk.CTkLabel(self.sidebar, text="Gamma Correction: 1.0\n(lower brightens, higher darkens)")
-        self.gamma_label.pack()
-        self.gamma_slider = ctk.CTkSlider(self.sidebar, from_=0.1, to=3.0, number_of_steps=29, command=self.change_gamma)
-        self.gamma_slider.set(1.0)
-        self.gamma_slider.pack(fill="x", padx=20, pady=2)
+        # Gamma Sky Correction
+        self.gamma_sky_label = ctk.CTkLabel(self.sidebar, text="Gamma Sky Correction: 1.0\n(lower brightens, higher darkens)")
+        self.gamma_sky_label.pack()
+        self.gamma_sky_slider = ctk.CTkSlider(self.sidebar, from_=0.1, to=3.0, number_of_steps=29, command=self.change_gamma_sky)
+        self.gamma_sky_slider.set(1.0)
+        self.gamma_sky_slider.pack(fill="x", padx=20, pady=2)
+        self.gamma_sky_slider.bind("<ButtonRelease-1>", self.on_gamma_slider_release)
+
+        # Gamma Ground Correction
+        self.gamma_ground_label = ctk.CTkLabel(self.sidebar, text="Gamma Ground Correction: 1.0\n(lower brightens, higher darkens)")
+        self.gamma_ground_label.pack()
+        self.gamma_ground_slider = ctk.CTkSlider(self.sidebar, from_=0.1, to=3.0, number_of_steps=29, command=self.change_gamma_ground)
+        self.gamma_ground_slider.set(1.0)
+        self.gamma_ground_slider.pack(fill="x", padx=20, pady=2)
+        self.gamma_ground_slider.bind("<ButtonRelease-1>", self.on_gamma_slider_release)
 
         # Stacking & Alignment Geometry Parameters
         self.params_label = ctk.CTkLabel(self.sidebar, text="Stacking & Alignment Geometry", font=ctk.CTkFont(size=14, weight="bold"))
@@ -180,15 +209,16 @@ class MilkyWayStackerApp(ctk.CTk):
 
         self.feather_label = ctk.CTkLabel(self.sidebar, text="Feathering Radius: 10px")
         self.feather_label.pack()
-        self.feather_slider = ctk.CTkSlider(self.sidebar, from_=0, to=250, number_of_steps=250, command=self.change_feather_radius)
+        self.feather_slider = ctk.CTkSlider(self.sidebar, from_=0, to=1000, number_of_steps=200, command=self.change_feather_radius)
         self.feather_slider.set(10)
         self.feather_slider.pack(fill="x", padx=20, pady=2)
+        self.feather_slider.bind("<ButtonRelease-1>", self.on_gamma_slider_release)
 
         # Pre-launch and Process / Save Buttons
         self.checks_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         self.checks_frame.pack(fill="x", padx=20, pady=(15, 2))
         
-        self.check_btn = ctk.CTkButton(self.checks_frame, text="Pre-Launch", width=120, fg_color="#cf830e", hover_color="#ad6c0a", command=self.run_prelaunch_check)
+        self.check_btn = ctk.CTkButton(self.checks_frame, text="Pre Launch statistics", width=120, fg_color="#cf830e", hover_color="#ad6c0a", command=self.run_prelaunch_check)
         self.check_btn.grid(row=0, column=0, padx=2, sticky="ew")
 
         self.debug_btn = ctk.CTkButton(self.checks_frame, text="Debug Matches", width=120, fg_color="#7b2cbf", hover_color="#5a189a", command=self.run_debug_matches)
@@ -258,8 +288,21 @@ class MilkyWayStackerApp(ctk.CTk):
         self.update_idletasks()
 
         self.canvas.show_mask = True
+        self.toggle_mask_btn.configure(text="Hide Sky Mask", fg_color="#4a4a4a", hover_color="#5a5a5a")
+        self.output_img = None
+        self.sky_stack_raw = None
+        self.ground_stack_raw = None
+        self.ref_img_preview = None
+        self.sky_stack_preview = None
+        self.ground_stack_preview = None
+        self.gamma_sky_slider.set(1.0)
+        self.gamma_ground_slider.set(1.0)
+        self.gamma_sky_label.configure(text="Gamma Sky Correction: 1.0\n(lower brightens, higher darkens)")
+        self.gamma_ground_label.configure(text="Gamma Ground Correction: 1.0\n(lower brightens, higher darkens)")
+
         self.original_reference_img = load_image(ref_path)
         if self.original_reference_img is not None:
+            self.ref_img_preview = resize_to_preview(self.original_reference_img)
             self.reference_img = self.original_reference_img.copy()
             self.canvas.set_image(self.reference_img)
             self.status_label.configure(text=f"Loaded {len(self.image_paths)} images. Paint the sky mask on the reference frame, then click 'Stack Images'.")
@@ -284,16 +327,92 @@ class MilkyWayStackerApp(ctk.CTk):
     def change_sigma(self, val):
         self.sigma_label.configure(text=f"Star Gaussian Blur (Sigma): {val:.1f}")
 
-    def change_gamma(self, val):
-        gamma = float(val)
-        self.gamma_label.configure(text=f"Gamma Correction: {gamma:.1f}\n(lower brightens, higher darkens)")
-        if self.original_reference_img is not None:
-            self.reference_img = apply_gamma(self.original_reference_img, gamma)
-            self.canvas.set_image(self.reference_img, reset_mask=False)
+    def change_gamma_sky(self, val):
+        gamma_sky = float(val)
+        self.gamma_sky_label.configure(text=f"Gamma Sky Correction: {gamma_sky:.1f}\n(lower brightens, higher darkens)")
+        self.apply_split_gamma_correction(preview=True)
+
+    def change_gamma_ground(self, val):
+        gamma_ground = float(val)
+        self.gamma_ground_label.configure(text=f"Gamma Ground Correction: {gamma_ground:.1f}\n(lower brightens, higher darkens)")
+        self.apply_split_gamma_correction(preview=True)
+
+    def on_gamma_slider_release(self, event):
+        self.apply_split_gamma_correction(preview=False)
+
+    def toggle_mask_visibility(self):
+        self.canvas.show_mask = not self.canvas.show_mask
+        if self.canvas.show_mask:
+            self.toggle_mask_btn.configure(text="Hide Sky Mask", fg_color="#4a4a4a", hover_color="#5a5a5a")
+        else:
+            self.toggle_mask_btn.configure(text="Show Sky Mask", fg_color="#1f538d", hover_color="#2b75c2")
+        self.update_display_image()
+
+    def apply_split_gamma_correction(self, preview=True):
+        gamma_sky = float(self.gamma_sky_slider.get())
+        gamma_ground = float(self.gamma_ground_slider.get())
+        feather = int(self.feather_slider.get())
+        mask = self.canvas.get_mask()
+        if mask is None:
+            return
+            
+        if preview:
+            # 1. Stacking complete: use preview stacks
+            if self.sky_stack_preview is not None and self.ground_stack_preview is not None:
+                sky_corr = apply_gamma(self.sky_stack_preview, gamma_sky)
+                ground_corr = apply_gamma(self.ground_stack_preview, gamma_ground)
+                
+                mask_prev = resize_to_preview(mask, max_dim=1200)
+                f_mask = feather_mask(mask_prev, int(feather * (mask_prev.shape[1] / mask.shape[1])))
+                f_mask_3d = np.expand_dims(f_mask, axis=2)
+                
+                blended = sky_corr.astype(np.float32) * f_mask_3d + ground_corr.astype(np.float32) * (1.0 - f_mask_3d)
+                preview_img = np.clip(blended, 0, 255).astype(np.uint8)
+                self.canvas.display_cv_img = preview_img
+                self.canvas.redraw(update_bg=True)
+                
+            # 2. Reference image: use reference preview
+            elif self.ref_img_preview is not None:
+                sky_corr = apply_gamma(self.ref_img_preview, gamma_sky)
+                ground_corr = apply_gamma(self.ref_img_preview, gamma_ground)
+                
+                mask_prev = resize_to_preview(mask, max_dim=1200)
+                f_mask = feather_mask(mask_prev, int(feather * (mask_prev.shape[1] / mask.shape[1])))
+                f_mask_3d = np.expand_dims(f_mask, axis=2)
+                
+                blended = sky_corr.astype(np.float32) * f_mask_3d + ground_corr.astype(np.float32) * (1.0 - f_mask_3d)
+                preview_img = np.clip(blended, 0, 255).astype(np.uint8)
+                self.canvas.display_cv_img = preview_img
+                self.canvas.redraw(update_bg=True)
+        else:
+            # Full resolution update on mouse release
+            if self.sky_stack_raw is not None and self.ground_stack_raw is not None:
+                sky_corr = apply_gamma(self.sky_stack_raw, gamma_sky)
+                ground_corr = apply_gamma(self.ground_stack_raw, gamma_ground)
+                
+                f_mask = feather_mask(mask, feather)
+                f_mask_3d = np.expand_dims(f_mask, axis=2)
+                
+                blended = sky_corr.astype(np.float32) * f_mask_3d + ground_corr.astype(np.float32) * (1.0 - f_mask_3d)
+                self.output_img = np.clip(blended, 0, 255).astype(np.uint8)
+                self.canvas.set_image(self.output_img, reset_mask=False)
+            elif self.original_reference_img is not None:
+                sky_corr = apply_gamma(self.original_reference_img, gamma_sky)
+                ground_corr = apply_gamma(self.original_reference_img, gamma_ground)
+                
+                f_mask = feather_mask(mask, feather)
+                f_mask_3d = np.expand_dims(f_mask, axis=2)
+                
+                blended = sky_corr.astype(np.float32) * f_mask_3d + ground_corr.astype(np.float32) * (1.0 - f_mask_3d)
+                self.reference_img = np.clip(blended, 0, 255).astype(np.uint8)
+                self.canvas.set_image(self.reference_img, reset_mask=False)
+                
+            self.update_display_image()
 
     def change_feather_radius(self, val):
         radius = int(val)
         self.feather_label.configure(text=f"Feathering Radius: {radius}px")
+        self.apply_split_gamma_correction(preview=True)
 
     def clear_mask(self):
         self.canvas.clear_mask()
@@ -345,7 +464,7 @@ class MilkyWayStackerApp(ctk.CTk):
         )
 
         msg = (
-            f"Pre-Launch Alignment Check:\n\n"
+            f"Pre Launch statistics:\n\n"
             f"Stars detected in Sky region: {sky_count}\n"
             f"Alignment points in Landscape region: {ground_count}\n\n"
         )
@@ -365,7 +484,7 @@ class MilkyWayStackerApp(ctk.CTk):
         else:
             msg += "ℹ️ Note: Ground alignment is skipped (entire image masked as sky).\n"
 
-        messagebox.showinfo("Pre-Launch Check", msg)
+        messagebox.showinfo("Pre Launch statistics", msg)
 
     def run_debug_matches(self):
         if len(self.image_paths) < 2:
@@ -373,7 +492,7 @@ class MilkyWayStackerApp(ctk.CTk):
             return
         
         # Load second image to compare and apply current gamma
-        gamma = float(self.gamma_slider.get())
+        gamma = float(self.gamma_sky_slider.get())
         second_img = load_image(self.image_paths[1])
         if second_img is None:
             messagebox.showerror("Error", f"Failed to load second image: {self.image_paths[1]}")
@@ -493,33 +612,39 @@ class MilkyWayStackerApp(ctk.CTk):
         mask = self.canvas.get_mask()
         contrast = float(self.contrast_slider.get())
         sigma = float(self.sigma_slider.get())
-        gamma = float(self.gamma_slider.get())
+        gamma_sky = float(self.gamma_sky_slider.get())
+        gamma_ground = float(self.gamma_ground_slider.get())
         transform = self.transform_menu.get()
         freeze_ground = self.freeze_ground_var.get()
         remove_trails = self.remove_trails_var.get()
 
         threading.Thread(
             target=self._stacking_thread, 
-            args=(mode, feather, mask, contrast, sigma, transform, freeze_ground, gamma, remove_trails), 
+            args=(mode, feather, mask, contrast, sigma, transform, freeze_ground, gamma_sky, gamma_ground, remove_trails), 
             daemon=True
         ).start()
 
-    def _stacking_thread(self, mode, feather, mask, contrast, sigma, transform, freeze_ground, gamma, remove_trails):
+    def _stacking_thread(self, mode, feather, mask, contrast, sigma, transform, freeze_ground, gamma_sky, gamma_ground, remove_trails):
         def update_progress(current, total, text):
             self.after(0, lambda: self.progress_bar.set(current / total))
             self.after(0, lambda: self.status_label.configure(text=text))
 
         try:
-            stacked, success_count, failed_reports = stack_images(
+            stacked, success_count, failed_reports, sky_stack, ground_stack = stack_images(
                 self.image_paths, mask=mask, 
                 stack_mode=mode, feather_radius=feather,
                 contrast_threshold=contrast, edge_threshold=10.0, sigma=sigma,
-                transform_type=transform, freeze_ground=freeze_ground, gamma=gamma,
+                transform_type=transform, freeze_ground=freeze_ground, 
+                gamma_sky=gamma_sky, gamma_ground=gamma_ground,
                 progress_callback=update_progress, cancel_event=self.stacking_cancel_event,
                 remove_trails=remove_trails
             )
             
             if stacked is not None:
+                self.sky_stack_raw = sky_stack
+                self.ground_stack_raw = ground_stack
+                self.sky_stack_preview = resize_to_preview(sky_stack)
+                self.ground_stack_preview = resize_to_preview(ground_stack)
                 self.output_img = stacked
                 self.after(0, lambda: self._on_stacking_complete(success_count, failed_reports))
             else:
@@ -542,6 +667,7 @@ class MilkyWayStackerApp(ctk.CTk):
         
         # Hide the red mask overlay to display the clean stacked output
         self.canvas.show_mask = False
+        self.toggle_mask_btn.configure(text="Show Sky Mask", fg_color="#1f538d", hover_color="#2b75c2")
         
         # Enable controls
         self.stack_btn.configure(text="Stack Images", fg_color="#2b8c44", hover_color="#1d662e", state="normal")
