@@ -37,37 +37,70 @@ def align_single_frame(path, ref_img, mask, contrast_threshold, edge_threshold, 
     except Exception as e:
         return None, None, f"Alignment failed: {str(e)}"
 
-def sigma_clipped_mean(img_list, sigma_factor=2.5):
+def stack_chunk(chunk, stack_mode, remove_trails, sigma_factor=2.5):
     """
-    Stacks images by taking the mean of pixels that are NOT positive outliers
-    (e.g. bright satellite or airplane trails).
-    Uses MAD (Median Absolute Deviation) for robust outlier detection.
+    Stacks a chunk of shape (N, H_i, W, C) along axis 0 using the selected stacking mode.
     """
-    if len(img_list) < 3:
-        # Sigma clipping requires at least 3 frames to distinguish outliers from signal!
-        return np.mean(img_list, axis=0).astype(np.uint8)
+    if remove_trails:
+        if chunk.shape[0] < 3:
+            return np.mean(chunk, axis=0).astype(np.uint8)
+        med = np.median(chunk, axis=0)
+        abs_dev = np.abs(chunk - med)
+        mad = np.median(abs_dev, axis=0)
+        mad = np.where(mad < 1.0, 1.0, mad)
+        threshold = sigma_factor * 1.4826 * mad
+        outlier_mask = (chunk - med) > threshold
+        masked_arr = np.where(outlier_mask, 0.0, chunk)
+        valid_counts = np.sum(~outlier_mask, axis=0)
+        valid_counts = np.where(valid_counts < 1, 1, valid_counts)
+        mean_img = np.sum(masked_arr, axis=0) / valid_counts
+        return np.clip(mean_img, 0, 255).astype(np.uint8)
+    elif stack_mode == 'median':
+        return np.median(chunk, axis=0).astype(np.uint8)
+    else:
+        return np.mean(chunk, axis=0).astype(np.uint8)
+
+def stack_parallel_chunks(img_list, stack_mode, remove_trails, progress_callback=None, phase_name="sky"):
+    """
+    Stacks list of images by partitioning them along height into parallel chunks
+    to utilize multiple CPU cores for CPU-bound median / sigma-clipping operations.
+    """
+    if not img_list:
+        return None
         
+    num_images = len(img_list)
+    if num_images == 1:
+        return img_list[0].astype(np.uint8)
+
     arr = np.stack(img_list, axis=0)  # Shape: (N, H, W, C)
-    med = np.median(arr, axis=0)      # Shape: (H, W, C)
     
-    # Absolute deviation from median
-    abs_dev = np.abs(arr - med)       # Shape: (N, H, W, C)
-    mad = np.median(abs_dev, axis=0)  # Shape: (H, W, C)
+    # Cap parallel workers at min(4, max(1, CPU cores - 1)) to prevent over-subscription
+    num_chunks = min(4, max(1, multiprocessing.cpu_count() - 1))
     
-    # Avoid division by zero and limit minimum noise threshold
-    mad = np.where(mad < 1.0, 1.0, mad)
+    if num_chunks <= 1:
+        return stack_chunk(arr, stack_mode, remove_trails)
+
+    # Split the array along the height axis (axis 1)
+    chunks = np.array_split(arr, num_chunks, axis=1)
     
-    # Detect positive outliers (pixels significantly brighter than median)
-    threshold = sigma_factor * 1.4826 * mad
-    outlier_mask = (arr - med) > threshold  # Boolean array of shape (N, H, W, C)
+    futures = {}
+    results = [None] * num_chunks
     
-    # Replace outliers with 0.0 for sum, and count valid pixels
-    masked_arr = np.where(outlier_mask, 0.0, arr)
-    valid_counts = np.sum(~outlier_mask, axis=0)
-    valid_counts = np.where(valid_counts < 1, 1, valid_counts)
-    
-    mean_img = np.sum(masked_arr, axis=0) / valid_counts
-    return np.clip(mean_img, 0, 255).astype(np.uint8)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_chunks) as executor:
+        for idx, chunk in enumerate(chunks):
+            future = executor.submit(stack_chunk, chunk, stack_mode, remove_trails, 2.5)
+            futures[future] = idx
+            
+        completed = 0
+        for future in concurrent.futures.as_completed(futures.keys()):
+            idx = futures[future]
+            results[idx] = future.result()
+            completed += 1
+            if progress_callback:
+                progress_callback(num_images, num_images, f"Stacking {phase_name} (chunk {completed}/{num_chunks} finished)...")
+                
+    stacked_img = np.concatenate(results, axis=0)
+    return stacked_img
 
 def load_image(path):
     """
@@ -283,12 +316,7 @@ def stack_images(image_paths, mask=None, stack_mode='average', feather_radius=10
     if progress_callback:
         progress_callback(num_images, num_images, "Stacking sky frames...")
     
-    if remove_trails:
-        sky_stack = sigma_clipped_mean(valid_sky_list, sigma_factor=2.5)
-    elif stack_mode == 'median':
-        sky_stack = np.median(valid_sky_list, axis=0).astype(np.uint8)
-    else: # average
-        sky_stack = np.mean(valid_sky_list, axis=0).astype(np.uint8)
+    sky_stack = stack_parallel_chunks(valid_sky_list, stack_mode, remove_trails, progress_callback, phase_name="sky")
 
     # 4. Stack Ground
     if has_ground:
@@ -298,12 +326,7 @@ def stack_images(image_paths, mask=None, stack_mode='average', feather_radius=10
         else:
             if progress_callback:
                 progress_callback(num_images, num_images, "Stacking ground frames...")
-            if remove_trails:
-                ground_stack = sigma_clipped_mean(valid_ground_list, sigma_factor=2.5)
-            elif stack_mode == 'median':
-                ground_stack = np.median(valid_ground_list, axis=0).astype(np.uint8)
-            else:
-                ground_stack = np.mean(valid_ground_list, axis=0).astype(np.uint8)
+            ground_stack = stack_parallel_chunks(valid_ground_list, stack_mode, remove_trails, progress_callback, phase_name="ground")
     else:
         ground_stack = sky_stack
 
