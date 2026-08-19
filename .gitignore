@@ -6,9 +6,13 @@ __pycache__/
 # Large TIFF and test images (ignore high res raw frames)
 *.tiff
 *.tif
+*.fits
+*.fit
 *.png
 !logo.png
+!app-150x150.png
 maschera.png
+prova/
 
 # Environments
 .venv/

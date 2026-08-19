@@ -17,6 +17,13 @@ MilkyWayStacker processes images by splitting them into two regions (sky and lan
 * **Fourier Phase Correlation**: Computes translation offsets in the frequency domain. This is translation-only (no scale or skew skewing) preventing blur/loss of high-frequency details due to interpolation warping.
 * **Star Filtering**: Ignores short contours (stars/noise) using a length filter to prevent sky objects from biasing the landscape alignment.
 
+### 3. Color Calibration & White Balance (Post-Stacking / Preview)
+* **Sensor Quantum Efficiency (QE) Presets**: Calibrated channel multipliers for Sony IMX294/IMX492, IMX571, IMX533, IMX585, IMX462, and DSLRs.
+* **Background Neutralization**: Aligns the black point across R, G, and B channels to produce a clean, neutral dark sky background.
+* **Auto Photometric Stars WB**: Automatically calculates White Balance multipliers from non-saturated stellar flux in the sky region.
+* **SCNR (Green Noise Suppression)**: Eliminates green Bayer color cast.
+* **Color Saturation**: Boosts celestial colors (Milky Way dust lanes, Andromeda galaxy, stellar hues) in 16-bit high dynamic range.
+
 ---
 
 ## Installation & Requirements

@@ -5,3 +5,5 @@ customtkinter
 rawpy
 astropy
 astroalign
+windnd
+tkinterdnd2

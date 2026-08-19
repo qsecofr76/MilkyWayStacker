@@ -8,8 +8,16 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 
+try:
+    import windnd
+except ImportError:
+    windnd = None
+
 from ui.canvas import MaskingCanvas
-from core.stacker import stack_images, load_image, apply_gamma, feather_mask
+from core.stacker import (
+    stack_images, load_image, apply_gamma, feather_mask,
+    SENSOR_PRESETS, calculate_auto_white_balance, apply_color_calibration
+)
 from core.aligner import check_features, get_debug_matches_image, draw_constellations, get_debug_stars_image
 
 def resource_path(relative_path):
@@ -65,6 +73,14 @@ class MilkyWayStackerApp(ctk.CTk):
         # Register canvas brush size scroll wheel callback
         self.canvas.on_brush_size_changed = self._update_brush_slider
 
+        # Hook drag and drop files onto the window and canvas
+        if windnd is not None:
+            try:
+                windnd.hook_dropfiles(self, func=self.on_drop_files)
+                windnd.hook_dropfiles(self.canvas, func=self.on_drop_files)
+            except Exception as e:
+                print(f"Failed to hook drag and drop: {e}")
+
     def _create_widgets(self):
         # Configure grid layout: 2 columns, 2 rows
         self.grid_columnconfigure(0, weight=0)  # Left panel (fixed width)
@@ -97,8 +113,17 @@ class MilkyWayStackerApp(ctk.CTk):
         self.title_label.pack(pady=(10, 10))
 
         # Files Section
-        self.load_btn = ctk.CTkButton(self.sidebar, text="Load Images", command=self.load_images)
-        self.load_btn.pack(fill="x", padx=20, pady=5)
+        self.file_btns_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        self.file_btns_frame.pack(fill="x", padx=20, pady=5)
+        
+        self.load_btn = ctk.CTkButton(self.file_btns_frame, text="+ Add Images", command=self.load_images)
+        self.load_btn.grid(row=0, column=0, padx=(0, 2), sticky="ew")
+
+        self.clear_files_btn = ctk.CTkButton(self.file_btns_frame, text="Clear List", fg_color="#555555", hover_color="#666666", width=80, command=self.clear_images_list)
+        self.clear_files_btn.grid(row=0, column=1, padx=(2, 0), sticky="ew")
+        
+        self.file_btns_frame.grid_columnconfigure(0, weight=3)
+        self.file_btns_frame.grid_columnconfigure(1, weight=1)
 
         self.files_listbox = tk.Listbox(self.sidebar, bg="#2d2d2d", fg="white", borderwidth=0, selectbackground="#1f538d", height=6)
         self.files_listbox.pack(fill="x", padx=20, pady=5)
@@ -157,7 +182,7 @@ class MilkyWayStackerApp(ctk.CTk):
         # Gamma Sky Correction
         self.gamma_sky_label = ctk.CTkLabel(self.sidebar, text="Gamma Sky Correction: 1.0\n(lower brightens, higher darkens)")
         self.gamma_sky_label.pack()
-        self.gamma_sky_slider = ctk.CTkSlider(self.sidebar, from_=0.1, to=3.0, number_of_steps=29, command=self.change_gamma_sky)
+        self.gamma_sky_slider = ctk.CTkSlider(self.sidebar, from_=0.1, to=4.0, number_of_steps=39, command=self.change_gamma_sky)
         self.gamma_sky_slider.set(1.0)
         self.gamma_sky_slider.pack(fill="x", padx=20, pady=2)
         self.gamma_sky_slider.bind("<ButtonRelease-1>", self.on_gamma_slider_release)
@@ -165,7 +190,7 @@ class MilkyWayStackerApp(ctk.CTk):
         # Gamma Ground Correction
         self.gamma_ground_label = ctk.CTkLabel(self.sidebar, text="Gamma Ground Correction: 1.0\n(lower brightens, higher darkens)")
         self.gamma_ground_label.pack()
-        self.gamma_ground_slider = ctk.CTkSlider(self.sidebar, from_=0.1, to=3.0, number_of_steps=29, command=self.change_gamma_ground)
+        self.gamma_ground_slider = ctk.CTkSlider(self.sidebar, from_=0.1, to=4.0, number_of_steps=39, command=self.change_gamma_ground)
         self.gamma_ground_slider.set(1.0)
         self.gamma_ground_slider.pack(fill="x", padx=20, pady=2)
         self.gamma_ground_slider.bind("<ButtonRelease-1>", self.on_gamma_slider_release)
@@ -213,6 +238,60 @@ class MilkyWayStackerApp(ctk.CTk):
         self.feather_slider.set(10)
         self.feather_slider.pack(fill="x", padx=20, pady=2)
         self.feather_slider.bind("<ButtonRelease-1>", self.on_gamma_slider_release)
+
+        # Color Calibration & White Balance Tools
+        self.color_section_label = ctk.CTkLabel(self.sidebar, text="Color Calibration & White Balance", font=ctk.CTkFont(size=14, weight="bold"))
+        self.color_section_label.pack(pady=(15, 2))
+
+        # Sensor / Camera Preset Dropdown
+        self.sensor_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        self.sensor_frame.pack(fill="x", padx=20, pady=2)
+        self.sensor_label = ctk.CTkLabel(self.sensor_frame, text="Sensor / WB:")
+        self.sensor_label.pack(side="left")
+        self.sensor_menu = ctk.CTkComboBox(self.sensor_frame, values=list(SENSOR_PRESETS.keys()), command=self.on_sensor_preset_selected, width=175)
+        self.sensor_menu.set("Auto Stars (Photometric)")
+        self.sensor_menu.pack(side="right")
+
+        # Neutralize Sky Background checkbox
+        self.neutralize_bg_var = ctk.BooleanVar(value=True)
+        self.neutralize_bg_cb = ctk.CTkCheckBox(
+            self.sidebar, text="Neutralize Sky Background (Dark Gray)", 
+            variable=self.neutralize_bg_var,
+            command=self.on_color_toggle_changed
+        )
+        self.neutralize_bg_cb.pack(anchor="w", padx=20, pady=4)
+
+        # Red Channel Gain Slider
+        self.r_gain_label = ctk.CTkLabel(self.sidebar, text="Red Channel Gain: 1.95")
+        self.r_gain_label.pack()
+        self.r_gain_slider = ctk.CTkSlider(self.sidebar, from_=0.5, to=3.5, number_of_steps=60, command=self.change_r_gain)
+        self.r_gain_slider.set(1.95)
+        self.r_gain_slider.pack(fill="x", padx=20, pady=2)
+        self.r_gain_slider.bind("<ButtonRelease-1>", self.on_gamma_slider_release)
+
+        # Blue Channel Gain Slider
+        self.b_gain_label = ctk.CTkLabel(self.sidebar, text="Blue Channel Gain: 1.35")
+        self.b_gain_label.pack()
+        self.b_gain_slider = ctk.CTkSlider(self.sidebar, from_=0.5, to=3.5, number_of_steps=60, command=self.change_b_gain)
+        self.b_gain_slider.set(1.35)
+        self.b_gain_slider.pack(fill="x", padx=20, pady=2)
+        self.b_gain_slider.bind("<ButtonRelease-1>", self.on_gamma_slider_release)
+
+        # SCNR Green Noise Suppression Slider
+        self.scnr_label = ctk.CTkLabel(self.sidebar, text="SCNR Green Reduction: 0.70")
+        self.scnr_label.pack()
+        self.scnr_slider = ctk.CTkSlider(self.sidebar, from_=0.0, to=1.0, number_of_steps=20, command=self.change_scnr)
+        self.scnr_slider.set(0.70)
+        self.scnr_slider.pack(fill="x", padx=20, pady=2)
+        self.scnr_slider.bind("<ButtonRelease-1>", self.on_gamma_slider_release)
+
+        # Color Saturation Slider
+        self.saturation_label = ctk.CTkLabel(self.sidebar, text="Color Saturation: 1.20")
+        self.saturation_label.pack()
+        self.saturation_slider = ctk.CTkSlider(self.sidebar, from_=0.0, to=3.0, number_of_steps=60, command=self.change_saturation)
+        self.saturation_slider.set(1.20)
+        self.saturation_slider.pack(fill="x", padx=20, pady=2)
+        self.saturation_slider.bind("<ButtonRelease-1>", self.on_gamma_slider_release)
 
         # Pre-launch and Process / Save Buttons
         self.checks_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
@@ -266,6 +345,29 @@ class MilkyWayStackerApp(ctk.CTk):
         self.progress_bar.pack(side="right", padx=10, pady=10)
         self.progress_bar.set(0)
 
+    def on_drop_files(self, files):
+        if not files:
+            return
+        
+        valid_exts = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".dng", ".fit", ".fits", ".nef", ".cr2", ".cr3", ".arw", ".dcr"}
+        
+        clean_files = []
+        for f in files:
+            if isinstance(f, bytes):
+                try:
+                    f_str = f.decode('utf-8')
+                except UnicodeDecodeError:
+                    f_str = f.decode('mbcs', errors='ignore')
+            else:
+                f_str = str(f)
+            
+            ext = os.path.splitext(f_str)[1].lower()
+            if ext in valid_exts and os.path.isfile(f_str):
+                clean_files.append(f_str)
+                
+        if clean_files:
+            self._process_loaded_files(clean_files)
+
     def load_images(self):
         files = filedialog.askopenfilenames(
             title="Select Images for Stacking",
@@ -274,43 +376,118 @@ class MilkyWayStackerApp(ctk.CTk):
         if not files:
             return
 
-        self.image_paths = sorted(list(files))
-        
-        # Update Listbox
+        self._process_loaded_files(list(files))
+
+    def clear_images_list(self):
+        self.image_paths = []
         self.files_listbox.delete(0, tk.END)
-        for path in self.image_paths:
-            self.files_listbox.insert(tk.END, os.path.basename(path))
-
-        # Load reference image (middle frame of sequence to minimize overall distortion)
-        ref_idx = len(self.image_paths) // 2
-        ref_path = self.image_paths[ref_idx]
-        self.status_label.configure(text=f"Loading reference frame (middle): {os.path.basename(ref_path)}...")
-        self.update_idletasks()
-
-        self.canvas.show_mask = True
-        self.toggle_mask_btn.configure(text="Hide Sky Mask", fg_color="#4a4a4a", hover_color="#5a5a5a")
+        self.original_reference_img = None
+        self.reference_img = None
         self.output_img = None
         self.sky_stack_raw = None
         self.ground_stack_raw = None
         self.ref_img_preview = None
         self.sky_stack_preview = None
         self.ground_stack_preview = None
-        self.gamma_sky_slider.set(1.0)
-        self.gamma_ground_slider.set(1.0)
-        self.gamma_sky_label.configure(text="Gamma Sky Correction: 1.0\n(lower brightens, higher darkens)")
-        self.gamma_ground_label.configure(text="Gamma Ground Correction: 1.0\n(lower brightens, higher darkens)")
+        self.canvas.clear_mask()
+        self.canvas.original_cv_img = None
+        self.canvas.display_cv_img = None
+        self.canvas.tk_image = None
+        self.canvas.delete("all")
+        self.constellation_cb.configure(state="disabled")
+        self.save_btn.configure(state="disabled")
+        self.status_label.configure(text="Image list cleared. Ready to add images.")
 
-        self.original_reference_img = load_image(ref_path)
-        if self.original_reference_img is not None:
-            self.ref_img_preview = resize_to_preview(self.original_reference_img)
-            self.reference_img = self.original_reference_img.copy()
-            self.canvas.set_image(self.reference_img)
-            self.status_label.configure(text=f"Loaded {len(self.image_paths)} images. Paint the sky mask on the reference frame, then click 'Stack Images'.")
-            self.constellation_cb.configure(state="normal")
-            self.save_btn.configure(state="disabled")
-            self.update_display_image()
+    def _update_files_listbox(self):
+        self.files_listbox.delete(0, tk.END)
+        if not self.image_paths:
+            return
+            
+        folders = set(os.path.dirname(p) for p in self.image_paths)
+        basenames = [os.path.basename(p) for p in self.image_paths]
+        has_duplicate_names = len(basenames) != len(set(basenames))
+        
+        for idx, path in enumerate(self.image_paths):
+            fname = os.path.basename(path)
+            parent = os.path.basename(os.path.dirname(path))
+            if len(folders) > 1 or has_duplicate_names:
+                display_str = f"[{parent}] {fname}"
+            else:
+                display_str = fname
+            self.files_listbox.insert(tk.END, display_str)
+
+    def _process_loaded_files(self, file_paths):
+        if not file_paths:
+            return
+            
+        existing_set = set(self.image_paths)
+        new_paths = []
+        for p in file_paths:
+            abs_p = os.path.abspath(p)
+            if abs_p not in existing_set:
+                new_paths.append(abs_p)
+                existing_set.add(abs_p)
+                
+        if not new_paths and self.image_paths:
+            self.status_label.configure(text=f"Selected files are already in the list ({len(self.image_paths)} total).")
+            return
+
+        is_first_load = (len(self.image_paths) == 0 or self.original_reference_img is None)
+        self.image_paths.extend(new_paths)
+        
+        self._update_files_listbox()
+
+        # If this is the initial load, select middle frame as reference image and initialize canvas
+        if is_first_load:
+            ref_idx = len(self.image_paths) // 2
+            ref_path = self.image_paths[ref_idx]
+            ref_display = f"[{os.path.basename(os.path.dirname(ref_path))}] {os.path.basename(ref_path)}"
+            self.status_label.configure(text=f"Loading reference frame (middle): {ref_display}...")
+            self.update_idletasks()
+
+            self.canvas.show_mask = True
+            self.toggle_mask_btn.configure(text="Hide Sky Mask", fg_color="#4a4a4a", hover_color="#5a5a5a")
+            self.output_img = None
+            self.sky_stack_raw = None
+            self.ground_stack_raw = None
+            self.ref_img_preview = None
+            self.sky_stack_preview = None
+            self.ground_stack_preview = None
+            self.gamma_sky_slider.set(1.0)
+            self.gamma_ground_slider.set(1.0)
+            self.gamma_sky_label.configure(text="Gamma Sky Correction: 1.0\n(lower brightens, higher darkens)")
+            self.gamma_ground_label.configure(text="Gamma Ground Correction: 1.0\n(lower brightens, higher darkens)")
+
+            self.original_reference_img = load_image(ref_path)
+            if self.original_reference_img is not None:
+                # 1. Initialize canvas and mask FIRST so canvas and mask exist
+                self.reference_img = self.original_reference_img.copy()
+                self.canvas.set_image(self.reference_img, reset_mask=True)
+                self.ref_img_preview = resize_to_preview(self.original_reference_img)
+                
+                # 2. Auto-calculate WB if Auto Stars is selected
+                if self.sensor_menu.get() == "Auto Stars (Photometric)":
+                    kw_r, _, kw_b = calculate_auto_white_balance(self.ref_img_preview)
+                    self.r_gain_slider.set(kw_r)
+                    self.b_gain_slider.set(kw_b)
+                    self.r_gain_label.configure(text=f"Red Channel Gain: {kw_r:.2f}")
+                    self.b_gain_label.configure(text=f"Blue Channel Gain: {kw_b:.2f}")
+                
+                # 3. Apply color calibration and preview
+                self.apply_split_gamma_correction(preview=False)
+                
+                folder_count = len(set(os.path.dirname(p) for p in self.image_paths))
+                self.status_label.configure(text=f"Loaded {len(self.image_paths)} images from {folder_count} folder(s). Paint the sky mask, then click 'Stack Images'.")
+                self.constellation_cb.configure(state="normal")
+                self.save_btn.configure(state="disabled")
+            else:
+                self.status_label.configure(text="Failed to load reference image.")
         else:
-            self.status_label.configure(text="Failed to load reference image.")
+            # Subsequent load events: preserve current reference image and painted mask
+            folder_count = len(set(os.path.dirname(p) for p in self.image_paths))
+            self.status_label.configure(text=f"Added {len(new_paths)} images. Total: {len(self.image_paths)} images from {folder_count} folder(s).")
+            self.save_btn.configure(state="disabled")
+            self.constellation_cb.configure(state="normal")
 
     def _update_brush_slider(self, val):
         self.brush_size_slider.set(val)
@@ -337,6 +514,52 @@ class MilkyWayStackerApp(ctk.CTk):
         self.gamma_ground_label.configure(text=f"Gamma Ground Correction: {gamma_ground:.1f}\n(lower brightens, higher darkens)")
         self.apply_split_gamma_correction(preview=True)
 
+    def on_sensor_preset_selected(self, choice):
+        if choice == "Auto Stars (Photometric)":
+            base_img = self.sky_stack_preview if self.sky_stack_preview is not None else self.ref_img_preview
+            if base_img is not None:
+                mask = self.canvas.get_mask()
+                mask_prev = resize_to_preview(mask, max_dim=1200) if mask is not None else None
+                kw_r, _, kw_b = calculate_auto_white_balance(base_img, mask_prev)
+                self.r_gain_slider.set(kw_r)
+                self.b_gain_slider.set(kw_b)
+                self.r_gain_label.configure(text=f"Red Channel Gain: {kw_r:.2f}")
+                self.b_gain_label.configure(text=f"Blue Channel Gain: {kw_b:.2f}")
+        elif choice in SENSOR_PRESETS and SENSOR_PRESETS[choice] is not None:
+            preset = SENSOR_PRESETS[choice]
+            self.r_gain_slider.set(preset["r_gain"])
+            self.b_gain_slider.set(preset["b_gain"])
+            self.r_gain_label.configure(text=f"Red Channel Gain: {preset['r_gain']:.2f}")
+            self.b_gain_label.configure(text=f"Blue Channel Gain: {preset['b_gain']:.2f}")
+        self.apply_split_gamma_correction(preview=False)
+
+    def on_color_toggle_changed(self):
+        self.apply_split_gamma_correction(preview=False)
+
+    def change_r_gain(self, val):
+        r_gain = float(val)
+        self.r_gain_label.configure(text=f"Red Channel Gain: {r_gain:.2f}")
+        if self.sensor_menu.get() not in ["Custom", "Auto Stars (Photometric)"]:
+            self.sensor_menu.set("Custom")
+        self.apply_split_gamma_correction(preview=True)
+
+    def change_b_gain(self, val):
+        b_gain = float(val)
+        self.b_gain_label.configure(text=f"Blue Channel Gain: {b_gain:.2f}")
+        if self.sensor_menu.get() not in ["Custom", "Auto Stars (Photometric)"]:
+            self.sensor_menu.set("Custom")
+        self.apply_split_gamma_correction(preview=True)
+
+    def change_scnr(self, val):
+        scnr = float(val)
+        self.scnr_label.configure(text=f"SCNR Green Reduction: {scnr:.2f}")
+        self.apply_split_gamma_correction(preview=True)
+
+    def change_saturation(self, val):
+        sat = float(val)
+        self.saturation_label.configure(text=f"Color Saturation: {sat:.2f}")
+        self.apply_split_gamma_correction(preview=True)
+
     def on_gamma_slider_release(self, event):
         self.apply_split_gamma_correction(preview=False)
 
@@ -352,9 +575,22 @@ class MilkyWayStackerApp(ctk.CTk):
         gamma_sky = float(self.gamma_sky_slider.get())
         gamma_ground = float(self.gamma_ground_slider.get())
         feather = int(self.feather_slider.get())
+        r_gain = float(self.r_gain_slider.get())
+        b_gain = float(self.b_gain_slider.get())
+        scnr_amount = float(self.scnr_slider.get())
+        saturation = float(self.saturation_slider.get())
+        neutralize_bg = self.neutralize_bg_var.get()
+        
         mask = self.canvas.get_mask()
         if mask is None:
-            return
+            if self.reference_img is not None:
+                h, w = self.reference_img.shape[:2]
+                mask = np.zeros((h, w), dtype=np.uint8)
+            elif self.original_reference_img is not None:
+                h, w = self.original_reference_img.shape[:2]
+                mask = np.zeros((h, w), dtype=np.uint8)
+            else:
+                return
             
         if preview:
             # 1. Stacking complete: use preview stacks
@@ -367,8 +603,14 @@ class MilkyWayStackerApp(ctk.CTk):
                 f_mask_3d = np.expand_dims(f_mask, axis=2)
                 
                 blended = sky_corr.astype(np.float32) * f_mask_3d + ground_corr.astype(np.float32) * (1.0 - f_mask_3d)
-                preview_img = np.clip(blended, 0, 255).astype(np.uint8)
-                self.canvas.display_cv_img = preview_img
+                preview_img = np.clip(blended, 0, 65535).astype(np.uint16)
+                
+                preview_calibrated = apply_color_calibration(
+                    preview_img, r_gain=r_gain, g_gain=1.0, b_gain=b_gain,
+                    scnr_amount=scnr_amount, saturation=saturation,
+                    neutralize_bg=neutralize_bg, mask=mask_prev
+                )
+                self.canvas.display_cv_img = preview_calibrated
                 self.canvas.redraw(update_bg=True)
                 
             # 2. Reference image: use reference preview
@@ -381,11 +623,17 @@ class MilkyWayStackerApp(ctk.CTk):
                 f_mask_3d = np.expand_dims(f_mask, axis=2)
                 
                 blended = sky_corr.astype(np.float32) * f_mask_3d + ground_corr.astype(np.float32) * (1.0 - f_mask_3d)
-                preview_img = np.clip(blended, 0, 255).astype(np.uint8)
-                self.canvas.display_cv_img = preview_img
+                preview_img = np.clip(blended, 0, 65535).astype(np.uint16)
+                
+                preview_calibrated = apply_color_calibration(
+                    preview_img, r_gain=r_gain, g_gain=1.0, b_gain=b_gain,
+                    scnr_amount=scnr_amount, saturation=saturation,
+                    neutralize_bg=neutralize_bg, mask=mask_prev
+                )
+                self.canvas.display_cv_img = preview_calibrated
                 self.canvas.redraw(update_bg=True)
         else:
-            # Full resolution update on mouse release
+            # Full resolution update on mouse release in 16-bit
             if self.sky_stack_raw is not None and self.ground_stack_raw is not None:
                 sky_corr = apply_gamma(self.sky_stack_raw, gamma_sky)
                 ground_corr = apply_gamma(self.ground_stack_raw, gamma_ground)
@@ -394,7 +642,13 @@ class MilkyWayStackerApp(ctk.CTk):
                 f_mask_3d = np.expand_dims(f_mask, axis=2)
                 
                 blended = sky_corr.astype(np.float32) * f_mask_3d + ground_corr.astype(np.float32) * (1.0 - f_mask_3d)
-                self.output_img = np.clip(blended, 0, 255).astype(np.uint8)
+                full_img = np.clip(blended, 0, 65535).astype(np.uint16)
+                
+                self.output_img = apply_color_calibration(
+                    full_img, r_gain=r_gain, g_gain=1.0, b_gain=b_gain,
+                    scnr_amount=scnr_amount, saturation=saturation,
+                    neutralize_bg=neutralize_bg, mask=mask
+                )
                 self.canvas.set_image(self.output_img, reset_mask=False)
             elif self.original_reference_img is not None:
                 sky_corr = apply_gamma(self.original_reference_img, gamma_sky)
@@ -404,7 +658,13 @@ class MilkyWayStackerApp(ctk.CTk):
                 f_mask_3d = np.expand_dims(f_mask, axis=2)
                 
                 blended = sky_corr.astype(np.float32) * f_mask_3d + ground_corr.astype(np.float32) * (1.0 - f_mask_3d)
-                self.reference_img = np.clip(blended, 0, 255).astype(np.uint8)
+                full_img = np.clip(blended, 0, 65535).astype(np.uint16)
+                
+                self.reference_img = apply_color_calibration(
+                    full_img, r_gain=r_gain, g_gain=1.0, b_gain=b_gain,
+                    scnr_amount=scnr_amount, saturation=saturation,
+                    neutralize_bg=neutralize_bg, mask=mask
+                )
                 self.canvas.set_image(self.reference_img, reset_mask=False)
                 
             self.update_display_image()
@@ -669,6 +929,19 @@ class MilkyWayStackerApp(ctk.CTk):
         self.canvas.show_mask = False
         self.toggle_mask_btn.configure(text="Show Sky Mask", fg_color="#1f538d", hover_color="#2b75c2")
         
+        # Recalculate auto WB on stacked sky if Auto Stars is selected
+        if self.sensor_menu.get() == "Auto Stars (Photometric)" and self.sky_stack_preview is not None:
+            mask = self.canvas.get_mask()
+            mask_prev = resize_to_preview(mask, max_dim=1200) if mask is not None else None
+            kw_r, _, kw_b = calculate_auto_white_balance(self.sky_stack_preview, mask_prev)
+            self.r_gain_slider.set(kw_r)
+            self.b_gain_slider.set(kw_b)
+            self.r_gain_label.configure(text=f"Red Channel Gain: {kw_r:.2f}")
+            self.b_gain_label.configure(text=f"Blue Channel Gain: {kw_b:.2f}")
+
+        # Apply split gamma and color calibration to full stacked result
+        self.apply_split_gamma_correction(preview=False)
+
         # Enable controls
         self.stack_btn.configure(text="Stack Images", fg_color="#2b8c44", hover_color="#1d662e", state="normal")
         self.load_btn.configure(state="normal")
@@ -778,9 +1051,14 @@ class MilkyWayStackerApp(ctk.CTk):
             return
 
         file_path = filedialog.asksaveasfilename(
-            title="Save Stacked Image",
+            title="Save Stacked Image (16-bit / High Dynamic Range)",
             defaultextension=".tiff",
-            filetypes=[("TIFF Image", "*.tiff *.tif"), ("PNG Image", "*.png"), ("JPEG Image", "*.jpg *.jpeg")]
+            filetypes=[
+                ("16-bit TIFF Image", "*.tiff *.tif"),
+                ("16-bit PNG Image", "*.png"),
+                ("8-bit JPEG Image", "*.jpg *.jpeg"),
+                ("All Files", "*.*")
+            ]
         )
         if file_path:
             img_to_save = self.output_img
@@ -789,6 +1067,20 @@ class MilkyWayStackerApp(ctk.CTk):
                 annotated, found = draw_constellations(self.output_img, mask)
                 if found:
                     img_to_save = annotated
-            cv2.imwrite(file_path, img_to_save)
-            self.status_label.configure(text=f"Saved stacked image to: {os.path.basename(file_path)}")
-            messagebox.showinfo("Saved", "Image saved successfully.")
+
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext in [".jpg", ".jpeg"]:
+                # Convert to 8-bit for JPEG format
+                if img_to_save.dtype == np.uint16:
+                    img_to_save_jpg = (img_to_save >> 8).astype(np.uint8)
+                else:
+                    img_to_save_jpg = img_to_save
+                cv2.imwrite(file_path, img_to_save_jpg)
+                bit_depth_str = "8-bit"
+            else:
+                # Save full 16-bit high dynamic range (TIFF, PNG)
+                cv2.imwrite(file_path, img_to_save)
+                bit_depth_str = "16-bit" if img_to_save.dtype == np.uint16 else "8-bit"
+                
+            self.status_label.configure(text=f"Saved {bit_depth_str} stacked image to: {os.path.basename(file_path)}")
+            messagebox.showinfo("Saved", f"Stacked image successfully saved as {bit_depth_str} ({os.path.basename(file_path)}).")

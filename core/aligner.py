@@ -40,7 +40,12 @@ def detect_stars_centroids(img, mask=None, contrast_threshold=0.04, sigma=1.6, m
     """
     Detects star centroids in the image using dynamic thresholding based on the contrast slider.
     """
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    if img.dtype == np.uint16:
+        img_8bit = (img >> 8).astype(np.uint8)
+    else:
+        img_8bit = img
+        
+    gray = cv2.cvtColor(img_8bit, cv2.COLOR_BGR2GRAY)
     if mask is not None:
         gray = cv2.bitwise_and(gray, mask)
         
@@ -105,7 +110,7 @@ def detect_and_filter_stars(img, mask=None, contrast_threshold=0.04, sigma=1.6, 
     them evenly using a 6x6 spatial grid.
     """
     # 1. Detect on full image to prevent fake edge gradients
-    all_stars = detect_stars_centroids(img, mask=None, contrast_threshold=contrast_threshold, sigma=sigma, max_stars=300)
+    all_stars = detect_stars_centroids(img, mask=None, contrast_threshold=contrast_threshold, sigma=sigma, max_stars=max(300, max_stars * 3))
     if len(all_stars) == 0:
         return np.empty((0, 2), dtype=np.float32)
         
@@ -142,10 +147,11 @@ def detect_and_filter_stars(img, mask=None, contrast_threshold=0.04, sigma=1.6, 
             bins[key] = []
         bins[key].append(pt)
         
-    # Take up to 2 stars from each cell to ensure grid distribution
+    # Take stars per cell proportional to max_stars requested
+    per_cell = max(2, int(np.ceil(max_stars / 36.0)))
     homogenized = []
     for key, cell_pts in bins.items():
-        homogenized.extend(cell_pts[:2])
+        homogenized.extend(cell_pts[:per_cell])
         
     return np.array(homogenized[:max_stars], dtype=np.float32)
 
@@ -198,8 +204,11 @@ def align_landscape_optical_flow(ref_img, target_img, mask, transform_type="affi
     Guarantees pure translation-only alignment (zero scale, zero skew, zero rotation deformation).
     Handles extremely large displacements (500px+) instantly and perfectly.
     """
-    gray_ref = cv2.cvtColor(ref_img, cv2.COLOR_BGR2GRAY)
-    gray_target = cv2.cvtColor(target_img, cv2.COLOR_BGR2GRAY)
+    ref_8bit = (ref_img >> 8).astype(np.uint8) if ref_img.dtype == np.uint16 else ref_img
+    tgt_8bit = (target_img >> 8).astype(np.uint8) if target_img.dtype == np.uint16 else target_img
+    
+    gray_ref = cv2.cvtColor(ref_8bit, cv2.COLOR_BGR2GRAY)
+    gray_target = cv2.cvtColor(tgt_8bit, cv2.COLOR_BGR2GRAY)
     
     # 1. Apply CLAHE to stretch the dynamic range and reveal details in dark shadows
     clahe = cv2.createCLAHE(clipLimit=5.0, tileGridSize=(8, 8))
@@ -254,25 +263,34 @@ def detect_and_align(ref_img, target_img, mask=None, align_sky=True,
     h, w, c = ref_img.shape
     
     if align_sky:
-        # Pre-detect and filter stars homogeneously
-        ref_stars = detect_and_filter_stars(ref_img, mask, contrast_threshold=contrast_threshold, sigma=sigma, max_stars=50)
-        target_stars = detect_and_filter_stars(target_img, mask, contrast_threshold=contrast_threshold, sigma=sigma, max_stars=50)
-        
-        if len(ref_stars) < 3 or len(target_stars) < 3:
-            raise RuntimeError("Less than 3 stars detected in the sky region.")
+        M = None
+        last_err = None
+        for max_s in [40, 60, 80, 100, 150, 200, 300]:
+            ref_stars = detect_and_filter_stars(ref_img, mask, contrast_threshold=contrast_threshold, sigma=sigma, max_stars=max_s)
+            target_stars = detect_and_filter_stars(target_img, mask, contrast_threshold=contrast_threshold, sigma=sigma, max_stars=max_s)
             
-        try:
-            transf, (s_list, t_list) = aa.find_transform(target_stars, ref_stars)
-            M = transf.params
-            
-            # Sanity check: camera lens zoom scale must be very close to 1.0 (no focal length changes)
-            if M is not None:
-                s_x = np.linalg.norm(M[0, :2])
-                s_y = np.linalg.norm(M[1, :2])
-                if abs(s_x - 1.0) > 0.03 or abs(s_y - 1.0) > 0.03:
-                    raise ValueError(f"Scale anomaly (sx={s_x:.3f}, sy={s_y:.3f}). Rejected false star matches.")
-        except Exception as e:
-            raise RuntimeError(f"Astroalign failed: {str(e)}")
+            if len(ref_stars) < 3 or len(target_stars) < 3:
+                last_err = "Less than 3 stars detected in the sky region."
+                continue
+                
+            try:
+                transf, (s_list, t_list) = aa.find_transform(target_stars, ref_stars)
+                candidate_M = transf.params
+                
+                # Sanity check: camera lens zoom scale must be very close to 1.0 (no focal length changes)
+                if candidate_M is not None:
+                    s_x = np.linalg.norm(candidate_M[0, :2])
+                    s_y = np.linalg.norm(candidate_M[1, :2])
+                    if abs(s_x - 1.0) > 0.03 or abs(s_y - 1.0) > 0.03:
+                        last_err = f"Scale anomaly (sx={s_x:.3f}, sy={s_y:.3f}). Rejected false star matches."
+                        continue
+                    M = candidate_M
+                    break
+            except Exception as e:
+                last_err = f"Astroalign failed: {str(e)}"
+                
+        if M is None:
+            raise RuntimeError(last_err or "Astroalign failed to find star matches.")
     else:
         M = align_landscape_optical_flow(ref_img, target_img, mask, transform_type)
         if M is None:
@@ -303,8 +321,11 @@ def get_debug_matches_image(ref_img, target_img, mask=None, align_sky=True,
     Diagnostic matching visualization drawing matching numbers on aligned points
     with a safety exclusion zone applied along the mask boundary.
     """
-    h, w, c = ref_img.shape
-    combined = np.hstack((ref_img.copy(), target_img.copy()))
+    ref_8bit = (ref_img >> 8).astype(np.uint8) if ref_img.dtype == np.uint16 else ref_img.copy()
+    tgt_8bit = (target_img >> 8).astype(np.uint8) if target_img.dtype == np.uint16 else target_img.copy()
+    
+    h, w, c = ref_8bit.shape
+    combined = np.hstack((ref_8bit.copy(), tgt_8bit.copy()))
     
     # Dynamic scaling for text labels and shapes based on image resolution
     font_scale = max(0.6, w / 1600.0)
@@ -314,8 +335,8 @@ def get_debug_matches_image(ref_img, target_img, mask=None, align_sky=True,
     circle_thickness = max(2, int(w / 800.0))
     
     if align_sky:
-        ref_stars = detect_and_filter_stars(ref_img, mask, contrast_threshold=contrast_threshold, sigma=sigma, max_stars=50)
-        target_stars = detect_and_filter_stars(target_img, mask, contrast_threshold=contrast_threshold, sigma=sigma, max_stars=50)
+        ref_stars = detect_and_filter_stars(ref_8bit, mask, contrast_threshold=contrast_threshold, sigma=sigma, max_stars=50)
+        target_stars = detect_and_filter_stars(tgt_8bit, mask, contrast_threshold=contrast_threshold, sigma=sigma, max_stars=50)
         
         try:
             transf, (s_list, t_list) = aa.find_transform(target_stars, ref_stars)
@@ -340,8 +361,8 @@ def get_debug_matches_image(ref_img, target_img, mask=None, align_sky=True,
                                font_scale=title_scale, color=(0, 0, 255), thickness=thickness)
     else:
         # Ground debug (contour-based rigid registration on first & last frames)
-        gray_ref = cv2.cvtColor(ref_img, cv2.COLOR_BGR2GRAY)
-        gray_target = cv2.cvtColor(target_img, cv2.COLOR_BGR2GRAY)
+        gray_ref = cv2.cvtColor(ref_8bit, cv2.COLOR_BGR2GRAY)
+        gray_target = cv2.cvtColor(tgt_8bit, cv2.COLOR_BGR2GRAY)
         
         # 1. Apply CLAHE to stretch the dynamic range and reveal details in dark shadows
         clahe = cv2.createCLAHE(clipLimit=5.0, tileGridSize=(8, 8))
@@ -372,13 +393,13 @@ def get_debug_matches_image(ref_img, target_img, mask=None, align_sky=True,
         edges_tgt = filter_landscape_contours(edges_tgt, min_length=80)
         
         # 5. Calculate shifts
-        M = align_landscape_optical_flow(ref_img, target_img, mask)
+        M = align_landscape_optical_flow(ref_8bit, tgt_8bit, mask)
         if M is not None:
             # Warp the target (last) image to reference (first) image coordinates using Lanczos4
-            warped_tgt = cv2.warpAffine(target_img, M, (w, h), flags=cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_REFLECT)
+            warped_tgt = cv2.warpAffine(tgt_8bit, M, (w, h), flags=cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_REFLECT)
             
             # Create a sum/average blend image of the first (ref) and aligned last (target) images
-            sum_img = cv2.addWeighted(ref_img, 0.5, warped_tgt, 0.5, 0)
+            sum_img = cv2.addWeighted(ref_8bit, 0.5, warped_tgt, 0.5, 0)
             
             # Warp the target edge map using the same rigid transform
             edges_tgt_warped = cv2.warpAffine(edges_tgt, M, (w, h), flags=cv2.INTER_NEAREST)
@@ -404,7 +425,7 @@ def get_debug_matches_image(ref_img, target_img, mask=None, align_sky=True,
                                font_scale=title_scale, color=(0, 255, 255), thickness=thickness)
             return sum_img
         else:
-            combined = np.hstack((ref_img.copy(), target_img.copy()))
+            combined = np.hstack((ref_8bit.copy(), tgt_8bit.copy()))
             draw_outlined_text(combined, "Landscape rigid alignment failed.", (20, int(40 * title_scale)), 
                                font_scale=title_scale, color=(0, 0, 255), thickness=thickness)
             return combined
@@ -414,8 +435,9 @@ def get_debug_stars_image(img, mask=None, contrast_threshold=0.04, sigma=1.6):
     Creates a debug visualization showing all recognizable stars in red circles
     distributed across the selected sky region.
     """
-    out_img = img.copy()
-    h, w = img.shape[:2]
+    img_8bit = (img >> 8).astype(np.uint8) if img.dtype == np.uint16 else img.copy()
+    out_img = img_8bit.copy()
+    h, w = img_8bit.shape[:2]
     
     # Dynamic scaling based on resolution
     font_scale = max(0.5, w / 1600.0)
@@ -424,14 +446,14 @@ def get_debug_stars_image(img, mask=None, contrast_threshold=0.04, sigma=1.6):
     circle_radius = max(6, int(w / 200.0))
     circle_thickness = max(2, int(w / 800.0))
     
-    stars = detect_and_filter_stars(img, mask, contrast_threshold=contrast_threshold, sigma=sigma, max_stars=120)
+    stars = detect_and_filter_stars(img_8bit, mask, contrast_threshold=contrast_threshold, sigma=sigma, max_stars=120)
     
     for idx, pt in enumerate(stars):
         cX, cY = int(pt[0]), int(pt[1])
         cv2.circle(out_img, (cX, cY), circle_radius, (0, 0, 255), circle_thickness)
         draw_outlined_text(out_img, str(idx+1), (cX + circle_radius + 4, cY - circle_radius - 4), font_scale=font_scale, color=(0, 0, 255), thickness=thickness)
         
-    draw_outlined_text(out_img, f"Detected Recognizable Stars: {len(stars)} (Homogeneous grid sampling)", (20, int(40 * title_scale)),
+    draw_outlined_text(out_img, f"Detected Recognizable Stars: {len(stars)} (Homogeneous grid sampling)", (20, int(40 * title_scale)), 
                        font_scale=title_scale, color=(0, 0, 255), thickness=thickness)
     return out_img
 
@@ -439,10 +461,11 @@ def check_features(ref_img, mask=None, contrast_threshold=0.04, edge_threshold=1
     """
     Returns (sky_star_count, ground_feature_count) for the reference image.
     """
-    ref_stars = detect_and_filter_stars(ref_img, mask, contrast_threshold=contrast_threshold, sigma=sigma, max_stars=300)
+    ref_8bit = (ref_img >> 8).astype(np.uint8) if ref_img.dtype == np.uint16 else ref_img
+    ref_stars = detect_and_filter_stars(ref_8bit, mask, contrast_threshold=contrast_threshold, sigma=sigma, max_stars=300)
     sky_count = len(ref_stars)
     
-    gray_ref = cv2.cvtColor(ref_img, cv2.COLOR_BGR2GRAY)
+    gray_ref = cv2.cvtColor(ref_8bit, cv2.COLOR_BGR2GRAY)
     if mask is not None:
         ground_mask = cv2.bitwise_not(mask)
         # Apply a very wide 150px exclusion zone to prevent selecting points near the mask transition boundary
@@ -826,10 +849,11 @@ def draw_constellations(img, mask=None, cancel_event=None):
                         
             if visible_stars >= max(2, int(len(all_stars_in_constellation) * 0.5)):
                 found_names.append(cname)
+                col_mult = 257 if out_img.dtype == np.uint16 else 1
                 # Draw lines
                 for s1, s2 in conn_lines:
                     if s1 in proj_pts and s2 in proj_pts:
-                        cv2.line(out_img, proj_pts[s1], proj_pts[s2], (0, 255, 0), 2, lineType=cv2.LINE_AA)
+                        cv2.line(out_img, proj_pts[s1], proj_pts[s2], (0, 255 * col_mult, 0), 2, lineType=cv2.LINE_AA)
                 # Draw small circles for visible stars of the constellation
                 xs = []
                 ys = []
@@ -837,7 +861,7 @@ def draw_constellations(img, mask=None, cancel_event=None):
                     if sname in proj_pts:
                         px, py = proj_pts[sname]
                         if 0 <= px < w and 0 <= py < h:
-                            cv2.circle(out_img, (px, py), 4, (0, 0, 255), -1, lineType=cv2.LINE_AA)
+                            cv2.circle(out_img, (px, py), 4, (0, 0, 255 * col_mult), -1, lineType=cv2.LINE_AA)
                             xs.append(px)
                             ys.append(py)
                 
@@ -848,7 +872,7 @@ def draw_constellations(img, mask=None, cancel_event=None):
                     cv2.putText(out_img, cname, (cx + 10, cy - 10), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 4, lineType=cv2.LINE_AA)
                     cv2.putText(out_img, cname, (cx + 10, cy - 10), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, lineType=cv2.LINE_AA)
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255 * col_mult, 0), 2, lineType=cv2.LINE_AA)
                             
         t_end = time.time()
         if found_names:

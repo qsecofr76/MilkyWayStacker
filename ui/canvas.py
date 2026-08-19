@@ -139,8 +139,12 @@ class MaskingCanvas(tk.Canvas):
 
         # Only resize the background image when requested or when size changes (highly optimized!)
         if update_bg or not hasattr(self, "resized_bg_pil") or self.resized_bg_pil is None or self.resized_bg_pil.size != (disp_w, disp_h):
-            # Convert OpenCV BGR to PIL RGB
-            rgb_img = cv2.cvtColor(target_img, cv2.COLOR_BGR2RGB)
+            # Convert OpenCV BGR to PIL RGB (converting 16-bit to 8-bit for display if needed)
+            if target_img.dtype == np.uint16:
+                disp_target = (target_img >> 8).astype(np.uint8)
+            else:
+                disp_target = target_img
+            rgb_img = cv2.cvtColor(disp_target, cv2.COLOR_BGR2RGB)
             pil_img = Image.fromarray(rgb_img)
             self.resized_bg_pil = pil_img.resize((disp_w, disp_h), Image.Resampling.LANCZOS)
 
