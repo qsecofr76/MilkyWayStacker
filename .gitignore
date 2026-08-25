@@ -32,3 +32,7 @@ dist/
 
 # Test generator script
 generate_test_data.py
+
+# Excluded calibration documents
+camera_calibration.json
+SettaggiIdealiPuntoDiBianco.md

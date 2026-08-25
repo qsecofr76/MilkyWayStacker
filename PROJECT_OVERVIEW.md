@@ -49,7 +49,7 @@ MilkyWayStacker/
 | 10 | **Full 16-bit High Dynamic Range Pipeline** | Output TIFF was 8-bit, causing quantization and loss of subtle astrophotography data. | Converted the entire loading, warping, stacking, gamma, and saving pipeline to native **16-bit (`uint16`, 0–65535)**. |
 | 11 | **Post-Stacking Color Calibration & Sensor WB** | Astronomical FITS had heavy green cast and washed-out white skies due to Bayer CFA quantum efficiency and sky background offsets. | Added background neutralization, Sony sensor QE presets (IMX294/IMX492, IMX571, IMX533, IMX585), Auto Star Photometric WB, SCNR green reduction, and saturation boost. |
 | 12 | **Multi-Folder Incremental Loading & Disambiguation** | Loading files in multiple batches or across directories with identical file names overwritten the list or caused confusion. | Implemented incremental list append, duplicate path filtering, parent directory label formatting `[dir] filename.fits`, and a `Clear List` button. |
-| 13 | **Bayer Channel Correction & Reflex / JSON Calibration** | Inverted Red/Blue channels due to OpenCV Bayer conversion naming convention (`COLOR_BayerRG2BGR`), and lack of DSLR 3x3 color matrix (CCM) and tone curves. | Fixed debayering with `COLOR_BayerXX2RGB` (native OpenCV BGR), added 3x3 CCM vector matrix transformation, S-Curve photographic tone mapping ($f(x)=x^2(3-2x)$), and automatic/manual `camera_calibration.json` loading. |
+| 13 | **Bayer Channel Correction & DSLR/Reflex Color Engine** | Inverted Red/Blue channels due to OpenCV Bayer conversion naming convention (`COLOR_BayerRG2BGR`), and lack of DSLR 3x3 color matrix (CCM) and tone curves. | Fixed debayering with `COLOR_BayerXX2RGB` (native OpenCV BGR), added 3x3 CCM vector matrix transformation, S-Curve photographic tone mapping ($f(x)=x^2(3-2x)$), and calibrated built-in sensor presets. |
 
 ---
 
@@ -100,7 +100,7 @@ MilkyWayStacker/
 * **Root Cause B (Missing DSLR/Reflex ISP Stage)**: Raw OSC astronomical CMOS sensors (e.g. Sony IMX294 in ZWO ASI294MC) lack on-camera hardware image signal processing (ISP), requiring white balance gains, $3 \times 3$ color matrix (CCM) spectral crosstalk removal, and non-linear tone curves.
 * **Resolution**:
   1. Changed Bayer conversions in `load_image` to `cv2.COLOR_BayerXX2RGB` to output true OpenCV BGR (`Channel 0 = Blue, 1 = Green, 2 = Red`).
-  2. Implemented `load_camera_calibration` to load $WB$ gains and $3 \times 3$ CCM from `camera_calibration.json`.
+  2. Embedded calibrated $WB$ gains and $3 \times 3$ CCM directly in `SENSOR_PRESETS` in [core/stacker.py](file:///c:/ProgettiPy/MilkyWayStacker/core/stacker.py).
   3. Integrated vector matrix transformation $\mathbf{M}_{BGR} = P \cdot (\text{CCM} \times \text{diag}(WB_R, 1.0, WB_B)) \cdot P$ via `cv2.transform`.
   4. Implemented 16-bit photographic S-Curve tone mapping $f(x) = x^2(3-2x)$ to deepen the dark sky background without crushing galactic details or clipping stars.
 

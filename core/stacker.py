@@ -5,11 +5,9 @@ import concurrent.futures
 import multiprocessing
 from core.aligner import detect_and_align
 
-import json
-
 # Preset channel multipliers and color correction matrices (CCM) for astronomical CMOS sensors and DSLRs
 SENSOR_PRESETS = {
-    "camera_calibration.json (ASI294MC)": {
+    "Sony IMX294 / IMX492 (ASI294MC)": {
         "r_gain": 1.51, "g_gain": 1.00, "b_gain": 1.416,
         "ccm": np.array([
             [ 1.0865, -0.0921,  0.0056],
@@ -26,11 +24,6 @@ SENSOR_PRESETS = {
             [-0.05, -0.20,  1.25]
         ], dtype=np.float32),
         "use_scurve": True
-    },
-    "Sony IMX294 / IMX492 (ASI294MC)": {
-        "r_gain": 1.51, "g_gain": 1.00, "b_gain": 1.416,
-        "ccm": None,
-        "use_scurve": False
     },
     "Sony IMX571 (ASI2600MC)": {
         "r_gain": 1.65, "g_gain": 1.00, "b_gain": 1.25,
@@ -65,57 +58,6 @@ SENSOR_PRESETS = {
     },
     "Custom": None
 }
-
-def load_camera_calibration(json_path="camera_calibration.json"):
-    """
-    Loads white balance multipliers, 3x3 color correction matrix (CCM),
-    and camera metadata from a calibration JSON file.
-    """
-    candidates = [json_path, "camera_calibration.json", os.path.join(os.path.dirname(__file__), "..", "camera_calibration.json")]
-    target_path = None
-    for p in candidates:
-        if p and os.path.exists(p):
-            target_path = p
-            break
-
-    if target_path:
-        try:
-            with open(target_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            wb_dict = data.get("white_balance_gains", {})
-            wb_r = float(wb_dict.get("WB_R", 1.51))
-            wb_g = float(wb_dict.get("WB_G", 1.00))
-            wb_b = float(wb_dict.get("WB_B", 1.416))
-            ccm_raw = data.get("color_correction_matrix_3x3", None)
-            if ccm_raw is not None:
-                ccm = np.array(ccm_raw, dtype=np.float32)
-            else:
-                ccm = np.eye(3, dtype=np.float32)
-            camera_name = data.get("camera_model", "Calibrated Camera")
-            return {
-                "camera_model": camera_name,
-                "r_gain": wb_r,
-                "g_gain": wb_g,
-                "b_gain": wb_b,
-                "ccm": ccm,
-                "path": target_path
-            }
-        except Exception as e:
-            print(f"Error reading calibration JSON {target_path}: {e}")
-
-    # Fallback default calibrated parameters for Sony IMX294 (ZWO ASI294MC)
-    return {
-        "camera_model": "ZWO ASI294MC Pro (Default CCM)",
-        "r_gain": 1.51,
-        "g_gain": 1.00,
-        "b_gain": 1.416,
-        "ccm": np.array([
-            [ 1.0865, -0.0921,  0.0056],
-            [ 0.1236,  0.7271,  0.1493],
-            [-0.0250, -0.1518,  1.1768]
-        ], dtype=np.float32),
-        "path": None
-    }
 
 def apply_s_curve(img_16, strength=1.0):
     """
