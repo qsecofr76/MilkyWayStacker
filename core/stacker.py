@@ -5,18 +5,134 @@ import concurrent.futures
 import multiprocessing
 from core.aligner import detect_and_align
 
-# Preset channel multipliers for astronomical CMOS sensors and DSLRs (compensating Bayer CFA Quantum Efficiency)
+import json
+
+# Preset channel multipliers and color correction matrices (CCM) for astronomical CMOS sensors and DSLRs
 SENSOR_PRESETS = {
+    "camera_calibration.json (ASI294MC)": {
+        "r_gain": 1.51, "g_gain": 1.00, "b_gain": 1.416,
+        "ccm": np.array([
+            [ 1.0865, -0.0921,  0.0056],
+            [ 0.1236,  0.7271,  0.1493],
+            [-0.0250, -0.1518,  1.1768]
+        ], dtype=np.float32),
+        "use_scurve": True
+    },
+    "Reflex / DSLR Mode (CCM + S-Curve)": {
+        "r_gain": 1.25, "g_gain": 1.00, "b_gain": 1.05,
+        "ccm": np.array([
+            [ 1.25, -0.20, -0.05],
+            [-0.10,  1.20, -0.10],
+            [-0.05, -0.20,  1.25]
+        ], dtype=np.float32),
+        "use_scurve": True
+    },
+    "Sony IMX294 / IMX492 (ASI294MC)": {
+        "r_gain": 1.51, "g_gain": 1.00, "b_gain": 1.416,
+        "ccm": None,
+        "use_scurve": False
+    },
+    "Sony IMX571 (ASI2600MC)": {
+        "r_gain": 1.65, "g_gain": 1.00, "b_gain": 1.25,
+        "ccm": None,
+        "use_scurve": False
+    },
+    "Sony IMX533 (ASI533MC)": {
+        "r_gain": 1.68, "g_gain": 1.00, "b_gain": 1.30,
+        "ccm": None,
+        "use_scurve": False
+    },
+    "Sony IMX585 (ASI585MC)": {
+        "r_gain": 1.50, "g_gain": 1.00, "b_gain": 1.20,
+        "ccm": None,
+        "use_scurve": False
+    },
+    "Sony IMX462 / IMX662": {
+        "r_gain": 1.60, "g_gain": 1.00, "b_gain": 1.40,
+        "ccm": None,
+        "use_scurve": False
+    },
+    "DSLR / Mirrorless Daylight": {
+        "r_gain": 2.10, "g_gain": 1.00, "b_gain": 1.50,
+        "ccm": None,
+        "use_scurve": False
+    },
     "Auto Stars (Photometric)": None,  # Calculated automatically from star flux
-    "Sony IMX294 / IMX492 (ASI294MC)": {"r_gain": 1.95, "g_gain": 1.00, "b_gain": 1.35},
-    "Sony IMX571 (ASI2600MC)": {"r_gain": 1.65, "g_gain": 1.00, "b_gain": 1.25},
-    "Sony IMX533 (ASI533MC)": {"r_gain": 1.68, "g_gain": 1.00, "b_gain": 1.30},
-    "Sony IMX585 (ASI585MC)": {"r_gain": 1.50, "g_gain": 1.00, "b_gain": 1.20},
-    "Sony IMX462 / IMX662": {"r_gain": 1.60, "g_gain": 1.00, "b_gain": 1.40},
-    "DSLR / Mirrorless Daylight": {"r_gain": 2.10, "g_gain": 1.00, "b_gain": 1.50},
-    "None / As-Is": {"r_gain": 1.00, "g_gain": 1.00, "b_gain": 1.00},
+    "None / As-Is": {
+        "r_gain": 1.00, "g_gain": 1.00, "b_gain": 1.00,
+        "ccm": None,
+        "use_scurve": False
+    },
     "Custom": None
 }
+
+def load_camera_calibration(json_path="camera_calibration.json"):
+    """
+    Loads white balance multipliers, 3x3 color correction matrix (CCM),
+    and camera metadata from a calibration JSON file.
+    """
+    candidates = [json_path, "camera_calibration.json", os.path.join(os.path.dirname(__file__), "..", "camera_calibration.json")]
+    target_path = None
+    for p in candidates:
+        if p and os.path.exists(p):
+            target_path = p
+            break
+
+    if target_path:
+        try:
+            with open(target_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            wb_dict = data.get("white_balance_gains", {})
+            wb_r = float(wb_dict.get("WB_R", 1.51))
+            wb_g = float(wb_dict.get("WB_G", 1.00))
+            wb_b = float(wb_dict.get("WB_B", 1.416))
+            ccm_raw = data.get("color_correction_matrix_3x3", None)
+            if ccm_raw is not None:
+                ccm = np.array(ccm_raw, dtype=np.float32)
+            else:
+                ccm = np.eye(3, dtype=np.float32)
+            camera_name = data.get("camera_model", "Calibrated Camera")
+            return {
+                "camera_model": camera_name,
+                "r_gain": wb_r,
+                "g_gain": wb_g,
+                "b_gain": wb_b,
+                "ccm": ccm,
+                "path": target_path
+            }
+        except Exception as e:
+            print(f"Error reading calibration JSON {target_path}: {e}")
+
+    # Fallback default calibrated parameters for Sony IMX294 (ZWO ASI294MC)
+    return {
+        "camera_model": "ZWO ASI294MC Pro (Default CCM)",
+        "r_gain": 1.51,
+        "g_gain": 1.00,
+        "b_gain": 1.416,
+        "ccm": np.array([
+            [ 1.0865, -0.0921,  0.0056],
+            [ 0.1236,  0.7271,  0.1493],
+            [-0.0250, -0.1518,  1.1768]
+        ], dtype=np.float32),
+        "path": None
+    }
+
+def apply_s_curve(img_16, strength=1.0):
+    """
+    Applies a photographic S-Curve tone mapping in 16-bit precision:
+    f(x) = x^2 * (3 - 2x), weighted by strength.
+    Deepens and cleans the dark sky background while preserving Milky Way dust structures
+    and providing soft highlight roll-off without star clipping.
+    """
+    if img_16 is None or strength <= 0.0:
+        return img_16
+        
+    x = np.linspace(0.0, 1.0, 65536, dtype=np.float32)
+    s_curve_val = x * x * (3.0 - 2.0 * x)
+    blended = (1.0 - float(strength)) * x + float(strength) * s_curve_val
+    lut = np.clip(blended * 65535.0, 0.0, 65535.0).astype(np.uint16)
+    
+    return lut[img_16]
 
 def calculate_auto_white_balance(img_bgr, mask=None):
     """
@@ -69,13 +185,15 @@ def calculate_auto_white_balance(img_bgr, mask=None):
 
 def apply_color_calibration(img_bgr, r_gain=1.0, g_gain=1.0, b_gain=1.0, 
                              scnr_amount=0.0, saturation=1.0, neutralize_bg=True, 
+                             ccm_matrix=None, apply_scurve=False, scurve_strength=1.0,
                              mask=None, target_bg_adu=1500.0):
     """
     Applies comprehensive astrophotography color calibration:
     1. Background Neutralization (aligns dark black/gray baseline across R, G, B channels)
-    2. White balance / Sensor QE channel gains (R, G, B)
+    2. White balance / Sensor QE channel gains (R, G, B) + optional 3x3 Color Correction Matrix (CCM)
     3. SCNR (Subtractive Chromatic Noise Reduction to eliminate green Bayer cast)
     4. Color Saturation enhancement in HSV space
+    5. Photographic S-Curve Tone Mapping for deep sky contrast
     Returns 16-bit uint16 image (0..65535).
     """
     if img_bgr is None:
@@ -105,10 +223,22 @@ def apply_color_calibration(img_bgr, r_gain=1.0, g_gain=1.0, b_gain=1.0,
         r = img_f[:, :, 2]
         pedestal = 0.0
         
-    # 2. Scale channels by gains
-    b = b * float(b_gain)
-    g = g * float(g_gain)
-    r = r * float(r_gain)
+    bgr_temp = np.stack([b, g, r], axis=2)
+    
+    # 2. Scale channels by gains and optional 3x3 CCM
+    if ccm_matrix is not None:
+        wb_diag_rgb = np.diag([float(r_gain), float(g_gain), float(b_gain)]).astype(np.float32)
+        M_rgb = np.asarray(ccm_matrix, dtype=np.float32) @ wb_diag_rgb
+        P = np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]], dtype=np.float32)
+        M_bgr = P @ M_rgb @ P
+        transformed = cv2.transform(bgr_temp, M_bgr)
+        b = transformed[:, :, 0]
+        g = transformed[:, :, 1]
+        r = transformed[:, :, 2]
+    else:
+        b = b * float(b_gain)
+        g = g * float(g_gain)
+        r = r * float(r_gain)
     
     # 3. SCNR (Green noise suppression)
     if scnr_amount > 0.0:
@@ -132,7 +262,13 @@ def apply_color_calibration(img_bgr, r_gain=1.0, g_gain=1.0, b_gain=1.0,
         out = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR) * 65535.0
         out = np.clip(out, 0.0, 65535.0)
         
-    return out.astype(np.uint16)
+    out_16 = out.astype(np.uint16)
+    
+    # 6. Photographic S-Curve Tone Mapping (if enabled)
+    if apply_scurve and scurve_strength > 0.0:
+        out_16 = apply_s_curve(out_16, strength=scurve_strength)
+        
+    return out_16
 
 
 def align_single_frame(path, ref_img_for_align_8bit, mask, contrast_threshold, edge_threshold, sigma, transform_type, freeze_ground, gamma):
@@ -324,13 +460,13 @@ def load_image(path):
                     if bayer_pat:
                         code = None
                         if 'RGGB' in bayer_pat:
-                            code = cv2.COLOR_BayerRG2BGR
+                            code = cv2.COLOR_BayerRG2RGB
                         elif 'BGGR' in bayer_pat:
-                            code = cv2.COLOR_BayerBG2BGR
+                            code = cv2.COLOR_BayerBG2RGB
                         elif 'GRBG' in bayer_pat:
-                            code = cv2.COLOR_BayerGR2BGR
+                            code = cv2.COLOR_BayerGR2RGB
                         elif 'GBRG' in bayer_pat:
-                            code = cv2.COLOR_BayerGB2BGR
+                            code = cv2.COLOR_BayerGB2RGB
                         
                         if code is not None:
                             try:

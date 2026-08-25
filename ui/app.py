@@ -16,7 +16,8 @@ except ImportError:
 from ui.canvas import MaskingCanvas
 from core.stacker import (
     stack_images, load_image, apply_gamma, feather_mask,
-    SENSOR_PRESETS, calculate_auto_white_balance, apply_color_calibration
+    SENSOR_PRESETS, calculate_auto_white_balance, apply_color_calibration,
+    load_camera_calibration, apply_s_curve
 )
 from core.aligner import check_features, get_debug_matches_image, draw_constellations, get_debug_stars_image
 
@@ -67,6 +68,7 @@ class MilkyWayStackerApp(ctk.CTk):
         self.constellation_cancel_event = threading.Event()
         self.stacking_cancel_event = threading.Event()
         self.is_stacking = False
+        self.current_ccm = None
 
         self._create_widgets()
         
@@ -249,8 +251,25 @@ class MilkyWayStackerApp(ctk.CTk):
         self.sensor_label = ctk.CTkLabel(self.sensor_frame, text="Sensor / WB:")
         self.sensor_label.pack(side="left")
         self.sensor_menu = ctk.CTkComboBox(self.sensor_frame, values=list(SENSOR_PRESETS.keys()), command=self.on_sensor_preset_selected, width=175)
-        self.sensor_menu.set("Auto Stars (Photometric)")
+        self.sensor_menu.set("camera_calibration.json (ASI294MC)")
         self.sensor_menu.pack(side="right")
+
+        # Load Custom Calibration JSON Button
+        self.load_calib_btn = ctk.CTkButton(
+            self.sidebar, text="Load Calibration JSON...", 
+            fg_color="#336699", hover_color="#224466", height=24,
+            command=self.load_custom_calibration_json
+        )
+        self.load_calib_btn.pack(fill="x", padx=20, pady=(2, 4))
+
+        # Reflex S-Curve Tone Mapping (Photographic Sky Deepening)
+        self.use_scurve_var = ctk.BooleanVar(value=True)
+        self.use_scurve_cb = ctk.CTkCheckBox(
+            self.sidebar, text="Reflex S-Curve (Deep Sky Contrast)", 
+            variable=self.use_scurve_var,
+            command=self.on_color_toggle_changed
+        )
+        self.use_scurve_cb.pack(anchor="w", padx=20, pady=2)
 
         # Neutralize Sky Background checkbox
         self.neutralize_bg_var = ctk.BooleanVar(value=True)
@@ -259,21 +278,21 @@ class MilkyWayStackerApp(ctk.CTk):
             variable=self.neutralize_bg_var,
             command=self.on_color_toggle_changed
         )
-        self.neutralize_bg_cb.pack(anchor="w", padx=20, pady=4)
+        self.neutralize_bg_cb.pack(anchor="w", padx=20, pady=2)
 
         # Red Channel Gain Slider
-        self.r_gain_label = ctk.CTkLabel(self.sidebar, text="Red Channel Gain: 1.95")
+        self.r_gain_label = ctk.CTkLabel(self.sidebar, text="Red Channel Gain: 1.51")
         self.r_gain_label.pack()
-        self.r_gain_slider = ctk.CTkSlider(self.sidebar, from_=0.5, to=3.5, number_of_steps=60, command=self.change_r_gain)
-        self.r_gain_slider.set(1.95)
+        self.r_gain_slider = ctk.CTkSlider(self.sidebar, from_=0.5, to=3.5, number_of_steps=300, command=self.change_r_gain)
+        self.r_gain_slider.set(1.51)
         self.r_gain_slider.pack(fill="x", padx=20, pady=2)
         self.r_gain_slider.bind("<ButtonRelease-1>", self.on_gamma_slider_release)
 
         # Blue Channel Gain Slider
-        self.b_gain_label = ctk.CTkLabel(self.sidebar, text="Blue Channel Gain: 1.35")
+        self.b_gain_label = ctk.CTkLabel(self.sidebar, text="Blue Channel Gain: 1.42")
         self.b_gain_label.pack()
-        self.b_gain_slider = ctk.CTkSlider(self.sidebar, from_=0.5, to=3.5, number_of_steps=60, command=self.change_b_gain)
-        self.b_gain_slider.set(1.35)
+        self.b_gain_slider = ctk.CTkSlider(self.sidebar, from_=0.5, to=3.5, number_of_steps=300, command=self.change_b_gain)
+        self.b_gain_slider.set(1.416)
         self.b_gain_slider.pack(fill="x", padx=20, pady=2)
         self.b_gain_slider.bind("<ButtonRelease-1>", self.on_gamma_slider_release)
 
@@ -465,13 +484,24 @@ class MilkyWayStackerApp(ctk.CTk):
                 self.canvas.set_image(self.reference_img, reset_mask=True)
                 self.ref_img_preview = resize_to_preview(self.original_reference_img)
                 
-                # 2. Auto-calculate WB if Auto Stars is selected
-                if self.sensor_menu.get() == "Auto Stars (Photometric)":
+                # 2. Configure WB and CCM based on selected preset
+                menu_val = self.sensor_menu.get()
+                if menu_val == "Auto Stars (Photometric)":
+                    self.current_ccm = None
                     kw_r, _, kw_b = calculate_auto_white_balance(self.ref_img_preview)
                     self.r_gain_slider.set(kw_r)
                     self.b_gain_slider.set(kw_b)
                     self.r_gain_label.configure(text=f"Red Channel Gain: {kw_r:.2f}")
                     self.b_gain_label.configure(text=f"Blue Channel Gain: {kw_b:.2f}")
+                elif menu_val in SENSOR_PRESETS and SENSOR_PRESETS[menu_val] is not None:
+                    preset = SENSOR_PRESETS[menu_val]
+                    self.current_ccm = preset.get("ccm")
+                    self.r_gain_slider.set(preset["r_gain"])
+                    self.b_gain_slider.set(preset["b_gain"])
+                    self.r_gain_label.configure(text=f"Red Channel Gain: {preset['r_gain']:.2f}")
+                    self.b_gain_label.configure(text=f"Blue Channel Gain: {preset['b_gain']:.2f}")
+                    if "use_scurve" in preset:
+                        self.use_scurve_var.set(preset["use_scurve"])
                 
                 # 3. Apply color calibration and preview
                 self.apply_split_gamma_correction(preview=False)
@@ -514,8 +544,29 @@ class MilkyWayStackerApp(ctk.CTk):
         self.gamma_ground_label.configure(text=f"Gamma Ground Correction: {gamma_ground:.1f}\n(lower brightens, higher darkens)")
         self.apply_split_gamma_correction(preview=True)
 
+    def load_custom_calibration_json(self):
+        json_file = filedialog.askopenfilename(
+            title="Select Camera Calibration JSON",
+            filetypes=[("JSON files", "*.json")]
+        )
+        if not json_file:
+            return
+            
+        calib = load_camera_calibration(json_file)
+        if calib:
+            self.current_ccm = calib.get("ccm")
+            self.r_gain_slider.set(calib.get("r_gain", 1.51))
+            self.b_gain_slider.set(calib.get("b_gain", 1.416))
+            self.r_gain_label.configure(text=f"Red Channel Gain: {calib.get('r_gain', 1.51):.2f}")
+            self.b_gain_label.configure(text=f"Blue Channel Gain: {calib.get('b_gain', 1.416):.2f}")
+            self.use_scurve_var.set(True)
+            self.sensor_menu.set(f"JSON: {calib.get('camera_model', 'Custom')}")
+            self.apply_split_gamma_correction(preview=False)
+            self.status_label.configure(text=f"Loaded calibration JSON: {os.path.basename(json_file)}")
+
     def on_sensor_preset_selected(self, choice):
         if choice == "Auto Stars (Photometric)":
+            self.current_ccm = None
             base_img = self.sky_stack_preview if self.sky_stack_preview is not None else self.ref_img_preview
             if base_img is not None:
                 mask = self.canvas.get_mask()
@@ -525,12 +576,23 @@ class MilkyWayStackerApp(ctk.CTk):
                 self.b_gain_slider.set(kw_b)
                 self.r_gain_label.configure(text=f"Red Channel Gain: {kw_r:.2f}")
                 self.b_gain_label.configure(text=f"Blue Channel Gain: {kw_b:.2f}")
+        elif choice == "camera_calibration.json (ASI294MC)":
+            calib = load_camera_calibration()
+            self.current_ccm = calib.get("ccm")
+            self.r_gain_slider.set(calib.get("r_gain", 1.51))
+            self.b_gain_slider.set(calib.get("b_gain", 1.416))
+            self.r_gain_label.configure(text=f"Red Channel Gain: {calib.get('r_gain', 1.51):.2f}")
+            self.b_gain_label.configure(text=f"Blue Channel Gain: {calib.get('b_gain', 1.416):.2f}")
+            self.use_scurve_var.set(True)
         elif choice in SENSOR_PRESETS and SENSOR_PRESETS[choice] is not None:
             preset = SENSOR_PRESETS[choice]
+            self.current_ccm = preset.get("ccm")
             self.r_gain_slider.set(preset["r_gain"])
             self.b_gain_slider.set(preset["b_gain"])
             self.r_gain_label.configure(text=f"Red Channel Gain: {preset['r_gain']:.2f}")
             self.b_gain_label.configure(text=f"Blue Channel Gain: {preset['b_gain']:.2f}")
+            if "use_scurve" in preset:
+                self.use_scurve_var.set(preset["use_scurve"])
         self.apply_split_gamma_correction(preview=False)
 
     def on_color_toggle_changed(self):
@@ -580,6 +642,7 @@ class MilkyWayStackerApp(ctk.CTk):
         scnr_amount = float(self.scnr_slider.get())
         saturation = float(self.saturation_slider.get())
         neutralize_bg = self.neutralize_bg_var.get()
+        apply_scurve = self.use_scurve_var.get()
         
         mask = self.canvas.get_mask()
         if mask is None:
@@ -608,7 +671,8 @@ class MilkyWayStackerApp(ctk.CTk):
                 preview_calibrated = apply_color_calibration(
                     preview_img, r_gain=r_gain, g_gain=1.0, b_gain=b_gain,
                     scnr_amount=scnr_amount, saturation=saturation,
-                    neutralize_bg=neutralize_bg, mask=mask_prev
+                    neutralize_bg=neutralize_bg, ccm_matrix=self.current_ccm,
+                    apply_scurve=apply_scurve, mask=mask_prev
                 )
                 self.canvas.display_cv_img = preview_calibrated
                 self.canvas.redraw(update_bg=True)
@@ -628,7 +692,8 @@ class MilkyWayStackerApp(ctk.CTk):
                 preview_calibrated = apply_color_calibration(
                     preview_img, r_gain=r_gain, g_gain=1.0, b_gain=b_gain,
                     scnr_amount=scnr_amount, saturation=saturation,
-                    neutralize_bg=neutralize_bg, mask=mask_prev
+                    neutralize_bg=neutralize_bg, ccm_matrix=self.current_ccm,
+                    apply_scurve=apply_scurve, mask=mask_prev
                 )
                 self.canvas.display_cv_img = preview_calibrated
                 self.canvas.redraw(update_bg=True)
@@ -647,7 +712,8 @@ class MilkyWayStackerApp(ctk.CTk):
                 self.output_img = apply_color_calibration(
                     full_img, r_gain=r_gain, g_gain=1.0, b_gain=b_gain,
                     scnr_amount=scnr_amount, saturation=saturation,
-                    neutralize_bg=neutralize_bg, mask=mask
+                    neutralize_bg=neutralize_bg, ccm_matrix=self.current_ccm,
+                    apply_scurve=apply_scurve, mask=mask
                 )
                 self.canvas.set_image(self.output_img, reset_mask=False)
             elif self.original_reference_img is not None:
@@ -663,7 +729,8 @@ class MilkyWayStackerApp(ctk.CTk):
                 self.reference_img = apply_color_calibration(
                     full_img, r_gain=r_gain, g_gain=1.0, b_gain=b_gain,
                     scnr_amount=scnr_amount, saturation=saturation,
-                    neutralize_bg=neutralize_bg, mask=mask
+                    neutralize_bg=neutralize_bg, ccm_matrix=self.current_ccm,
+                    apply_scurve=apply_scurve, mask=mask
                 )
                 self.canvas.set_image(self.reference_img, reset_mask=False)
                 

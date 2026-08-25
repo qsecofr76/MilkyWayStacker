@@ -23,6 +23,7 @@ sep = ';' if sys.platform.startswith('win') else ':'
 add_data_ctk = f"{ctk_path}{sep}customtkinter"
 add_data_logo = f"logo.png{sep}."
 add_data_app_logo = f"app-150x150.png{sep}."
+add_data_calib = f"camera_calibration.json{sep}."
 
 PyInstaller.__main__.run([
     'main.py',
@@ -33,6 +34,7 @@ PyInstaller.__main__.run([
     f'--add-data={add_data_ctk}',
     f'--add-data={add_data_logo}',
     f'--add-data={add_data_app_logo}',
+    f'--add-data={add_data_calib}',
     f'--add-data=core{sep}core',
     '--clean',
     '--noconfirm'
