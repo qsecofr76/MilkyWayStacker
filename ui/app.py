@@ -1,12 +1,14 @@
 import os
 import sys
+import json
+import base64
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import customtkinter as ctk
 import cv2
 import numpy as np
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageDraw
 
 try:
     import windnd
@@ -112,7 +114,28 @@ class MilkyWayStackerApp(ctk.CTk):
 
         # App Title
         self.title_label = ctk.CTkLabel(self.sidebar, text="MilkyWay Stacker", font=ctk.CTkFont(size=20, weight="bold"))
-        self.title_label.pack(pady=(10, 10))
+        self.title_label.pack(pady=(10, 5))
+
+        # Project Management (Save / Load Project)
+        self.project_btns_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        self.project_btns_frame.pack(fill="x", padx=20, pady=(2, 6))
+
+        self.save_project_btn = ctk.CTkButton(
+            self.project_btns_frame, text="💾 Save Project", 
+            fg_color="#0077b6", hover_color="#023e8a",
+            command=self.save_project
+        )
+        self.save_project_btn.grid(row=0, column=0, padx=(0, 2), sticky="ew")
+
+        self.load_project_btn = ctk.CTkButton(
+            self.project_btns_frame, text="📂 Load Project", 
+            fg_color="#6a0dad", hover_color="#4a0072",
+            command=self.load_project
+        )
+        self.load_project_btn.grid(row=0, column=1, padx=(2, 0), sticky="ew")
+
+        self.project_btns_frame.grid_columnconfigure(0, weight=1)
+        self.project_btns_frame.grid_columnconfigure(1, weight=1)
 
         # Files Section
         self.file_btns_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
@@ -737,6 +760,236 @@ class MilkyWayStackerApp(ctk.CTk):
             if self.canvas.load_mask_from_file(file_path):
                 self.status_label.configure(text=f"Loaded sky mask: {os.path.basename(file_path)}")
                 messagebox.showinfo("Loaded", "Mask loaded successfully.")
+
+    def save_project(self):
+        if not self.image_paths:
+            messagebox.showwarning("No Images", "Please load images into the project first before saving.")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            title="Save Project",
+            defaultextension=".mws",
+            filetypes=[
+                ("MilkyWay Stacker Project (*.mws)", "*.mws"),
+                ("JSON Project (*.json)", "*.json"),
+                ("All Files (*.*)", "*.*")
+            ]
+        )
+        if not file_path:
+            return
+
+        project_dir = os.path.dirname(os.path.abspath(file_path))
+        
+        # Build relative and absolute paths for portability across folders/drives
+        image_entries = []
+        for p in self.image_paths:
+            abs_p = os.path.abspath(p)
+            try:
+                rel_p = os.path.relpath(abs_p, project_dir)
+            except Exception:
+                rel_p = abs_p
+            image_entries.append({
+                "absolute_path": abs_p,
+                "relative_path": rel_p
+            })
+
+        # Encode sky mask as base64 PNG if drawn
+        mask_b64 = None
+        mask_w, mask_h = 0, 0
+        mask = self.canvas.get_mask()
+        if mask is not None and np.any(mask > 0):
+            mask_h, mask_w = mask.shape[:2]
+            success, enc_buf = cv2.imencode(".png", mask)
+            if success:
+                mask_b64 = base64.b64encode(enc_buf).decode("ascii")
+
+        project_data = {
+            "version": "1.0",
+            "images": image_entries,
+            "settings": {
+                "brush_size": int(self.brush_size_slider.get()),
+                "contrast_threshold": float(self.contrast_slider.get()),
+                "sigma": float(self.sigma_slider.get()),
+                "gamma_sky": float(self.gamma_sky_slider.get()),
+                "gamma_ground": float(self.gamma_ground_slider.get()),
+                "feather_radius": int(self.feather_slider.get()),
+                "transform_type": self.transform_menu.get(),
+                "stack_mode": self.stack_mode_menu.get(),
+                "freeze_ground": bool(self.freeze_ground_var.get()),
+                "remove_trails": bool(self.remove_trails_var.get()),
+                "sensor_preset": self.sensor_menu.get(),
+                "use_scurve": bool(self.use_scurve_var.get()),
+                "neutralize_bg": bool(self.neutralize_bg_var.get()),
+                "r_gain": float(self.r_gain_slider.get()),
+                "b_gain": float(self.b_gain_slider.get()),
+                "scnr_amount": float(self.scnr_slider.get()),
+                "saturation": float(self.saturation_slider.get()),
+                "show_constellations": bool(self.show_constellations_var.get())
+            },
+            "mask": {
+                "width": mask_w,
+                "height": mask_h,
+                "data_b64_png": mask_b64
+            }
+        }
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(project_data, f, indent=2)
+            self.status_label.configure(text=f"Project saved: {os.path.basename(file_path)}")
+            messagebox.showinfo("Project Saved", f"Project saved successfully:\n{file_path}")
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Failed to save project file: {str(e)}")
+
+    def load_project(self):
+        file_path = filedialog.askopenfilename(
+            title="Open MilkyWay Stacker Project",
+            filetypes=[
+                ("MilkyWay Stacker Project (*.mws, *.json)", "*.mws;*.json"),
+                ("All Files (*.*)", "*.*")
+            ]
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                project_data = json.load(f)
+        except Exception as e:
+            messagebox.showerror("Load Error", f"Failed to read project file: {str(e)}")
+            return
+
+        project_dir = os.path.dirname(os.path.abspath(file_path))
+        raw_images = project_data.get("images", [])
+        resolved_paths = []
+        missing_count = 0
+
+        for entry in raw_images:
+            if isinstance(entry, dict):
+                abs_p = entry.get("absolute_path", "")
+                rel_p = entry.get("relative_path", "")
+            else:
+                abs_p = str(entry)
+                rel_p = ""
+
+            target_path = None
+            if abs_p and os.path.exists(abs_p):
+                target_path = abs_p
+            elif rel_p:
+                cand = os.path.abspath(os.path.join(project_dir, rel_p))
+                if os.path.exists(cand):
+                    target_path = cand
+
+            if target_path:
+                resolved_paths.append(target_path)
+            else:
+                missing_count += 1
+
+        if not resolved_paths:
+            messagebox.showerror("No Files Found", "None of the image files referenced in the project could be found.")
+            return
+
+        if missing_count > 0:
+            messagebox.showwarning("Missing Images", f"{missing_count} image(s) from the project could not be found and were skipped.")
+
+        # 1. Clear previous list and load images
+        self.image_paths = []
+        self.files_listbox.delete(0, tk.END)
+        self._process_loaded_files(resolved_paths)
+
+        # 2. Restore settings
+        settings = project_data.get("settings", {})
+        
+        # Brush
+        brush_size = settings.get("brush_size", 30)
+        self.brush_size_slider.set(brush_size)
+        self.brush_size_label.configure(text=f"Brush Size: {brush_size}")
+        self.canvas.brush_size = brush_size
+
+        # Contrast / Sigma
+        contrast = settings.get("contrast_threshold", 0.04)
+        self.contrast_slider.set(contrast)
+        self.contrast_label.configure(text=f"Sensitivity (Contrast): {contrast:.3f}\n(lower detects more dim stars/details)")
+
+        sigma = settings.get("sigma", 1.6)
+        self.sigma_slider.set(sigma)
+        self.sigma_label.configure(text=f"Star Gaussian Blur (Sigma): {sigma:.1f}")
+
+        # Gamma
+        gamma_sky = settings.get("gamma_sky", 1.0)
+        self.gamma_sky_slider.set(gamma_sky)
+        self.gamma_sky_label.configure(text=f"Gamma Sky Correction: {gamma_sky:.1f}\n(lower brightens, higher darkens)")
+
+        gamma_ground = settings.get("gamma_ground", 1.0)
+        self.gamma_ground_slider.set(gamma_ground)
+        self.gamma_ground_label.configure(text=f"Gamma Ground Correction: {gamma_ground:.1f}\n(lower brightens, higher darkens)")
+
+        feather = settings.get("feather_radius", 15)
+        self.feather_slider.set(feather)
+        self.feather_label.configure(text=f"Feathering Radius: {feather}px")
+
+        # Alignment and Stacking menus
+        if "transform_type" in settings:
+            self.transform_menu.set(settings["transform_type"])
+        if "stack_mode" in settings:
+            self.stack_mode_menu.set(settings["stack_mode"])
+        if "freeze_ground" in settings:
+            self.freeze_ground_var.set(settings["freeze_ground"])
+        if "remove_trails" in settings:
+            self.remove_trails_var.set(settings["remove_trails"])
+
+        # Color & WB Settings
+        if "use_scurve" in settings:
+            self.use_scurve_var.set(settings["use_scurve"])
+        if "neutralize_bg" in settings:
+            self.neutralize_bg_var.set(settings["neutralize_bg"])
+
+        r_gain = settings.get("r_gain", 1.51)
+        self.r_gain_slider.set(r_gain)
+        self.r_gain_label.configure(text=f"Red Channel Gain: {r_gain:.2f}")
+
+        b_gain = settings.get("b_gain", 1.416)
+        self.b_gain_slider.set(b_gain)
+        self.b_gain_label.configure(text=f"Blue Channel Gain: {b_gain:.2f}")
+
+        scnr = settings.get("scnr_amount", 0.70)
+        self.scnr_slider.set(scnr)
+        self.scnr_label.configure(text=f"SCNR Green Reduction: {scnr:.2f}")
+
+        sat = settings.get("saturation", 1.20)
+        self.saturation_slider.set(sat)
+        self.saturation_label.configure(text=f"Color Saturation: {sat:.2f}")
+
+        if "show_constellations" in settings:
+            self.show_constellations_var.set(settings["show_constellations"])
+
+        preset_choice = settings.get("sensor_preset", "Custom")
+        self.sensor_menu.set(preset_choice)
+        if preset_choice in SENSOR_PRESETS and SENSOR_PRESETS[preset_choice] is not None:
+            self.current_ccm = SENSOR_PRESETS[preset_choice].get("ccm")
+        else:
+            self.current_ccm = None
+
+        # 3. Restore Mask
+        mask_info = project_data.get("mask", {})
+        mask_b64 = mask_info.get("data_b64_png") if isinstance(mask_info, dict) else None
+        if mask_b64 and self.reference_img is not None:
+            try:
+                enc_buf = np.frombuffer(base64.b64decode(mask_b64), dtype=np.uint8)
+                loaded_mask = cv2.imdecode(enc_buf, cv2.IMREAD_GRAYSCALE)
+                if loaded_mask is not None:
+                    h, w = self.reference_img.shape[:2]
+                    if loaded_mask.shape != (h, w):
+                        loaded_mask = cv2.resize(loaded_mask, (w, h), interpolation=cv2.INTER_NEAREST)
+                    self.canvas.mask_img = Image.fromarray(loaded_mask)
+                    self.canvas.mask_draw = ImageDraw.Draw(self.canvas.mask_img)
+            except Exception as me:
+                print(f"Failed to restore mask: {me}")
+
+        # 4. Refresh display and gamma
+        self.apply_split_gamma_correction(preview=False)
+        self.canvas.redraw(update_bg=True)
+        self.status_label.configure(text=f"Loaded project: {os.path.basename(file_path)} ({len(resolved_paths)} images)")
 
     def run_prelaunch_check(self):
         if self.reference_img is None:

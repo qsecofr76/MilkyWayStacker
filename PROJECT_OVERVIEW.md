@@ -50,6 +50,7 @@ MilkyWayStacker/
 | 11 | **Post-Stacking Color Calibration & Sensor WB** | Astronomical FITS had heavy green cast and washed-out white skies due to Bayer CFA quantum efficiency and sky background offsets. | Added background neutralization, Sony sensor QE presets (IMX294/IMX492, IMX571, IMX533, IMX585), Auto Star Photometric WB, SCNR green reduction, and saturation boost. |
 | 12 | **Multi-Folder Incremental Loading & Disambiguation** | Loading files in multiple batches or across directories with identical file names overwritten the list or caused confusion. | Implemented incremental list append, duplicate path filtering, parent directory label formatting `[dir] filename.fits`, and a `Clear List` button. |
 | 13 | **Bayer Channel Correction & DSLR/Reflex Color Engine** | Inverted Red/Blue channels due to OpenCV Bayer conversion naming convention (`COLOR_BayerRG2BGR`), and lack of DSLR 3x3 color matrix (CCM) and tone curves. | Fixed debayering with `COLOR_BayerXX2RGB` (native OpenCV BGR), added 3x3 CCM vector matrix transformation, S-Curve photographic tone mapping ($f(x)=x^2(3-2x)$), and calibrated built-in sensor presets. |
+| 14 | **Project Persistence (.mws / .json Save & Load)** | Users had to re-load files, re-tune all sliders, and re-draw the sky mask from scratch on every session. | Added `Save Project` and `Load Project` buttons with full workspace persistence (relative/absolute path resolution, all settings/sliders, and base64 PNG sky mask preservation). |
 
 ---
 

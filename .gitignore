@@ -36,3 +36,8 @@ generate_test_data.py
 # Excluded calibration documents
 camera_calibration.json
 SettaggiIdealiPuntoDiBianco.md
+
+# Project files
+*.mws
+*.mwproj
+
