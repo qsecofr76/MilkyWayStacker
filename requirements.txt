@@ -7,3 +7,5 @@ astropy
 astroalign
 windnd
 tkinterdnd2
+tifffile
+psdtags

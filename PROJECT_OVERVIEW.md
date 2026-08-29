@@ -51,6 +51,7 @@ MilkyWayStacker/
 | 12 | **Multi-Folder Incremental Loading & Disambiguation** | Loading files in multiple batches or across directories with identical file names overwritten the list or caused confusion. | Implemented incremental list append, duplicate path filtering, parent directory label formatting `[dir] filename.fits`, and a `Clear List` button. |
 | 13 | **Bayer Channel Correction & DSLR/Reflex Color Engine** | Inverted Red/Blue channels due to OpenCV Bayer conversion naming convention (`COLOR_BayerRG2BGR`), and lack of DSLR 3x3 color matrix (CCM) and tone curves. | Fixed debayering with `COLOR_BayerXX2RGB` (native OpenCV BGR), added 3x3 CCM vector matrix transformation, S-Curve photographic tone mapping ($f(x)=x^2(3-2x)$), and calibrated built-in sensor presets. |
 | 14 | **Project Persistence (.mws / .json Save & Load)** | Users had to re-load files, re-tune all sliders, and re-draw the sky mask from scratch on every session. | Added `Save Project` and `Load Project` buttons with full workspace persistence (relative/absolute path resolution, all settings/sliders, and base64 PNG sky mask preservation). |
+| 15 | **Photoshop Layered TIFF Export (Constellations)** | Users wanted constellation annotations on a separate, toggleable Photoshop layer without destructively altering the clean astrophoto background. | Integrated Adobe Photoshop-compliant 16-bit layered TIFF generation (`ImageSourceData` tag #37724 via `psdtags` and `tifffile`), saving clean stacked image as "Background" and annotations as a transparent "Constellations" layer. |
 
 ---
 

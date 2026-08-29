@@ -3,6 +3,18 @@ import cv2
 import numpy as np
 import concurrent.futures
 import multiprocessing
+import tifffile
+
+try:
+    import psdtags
+    from psdtags import (
+        TiffImageSourceData, PsdFormat, PsdLayers, PsdKey, PsdLayer,
+        PsdRectangle, PsdChannel, PsdChannelId, PsdCompressionType,
+        PsdBlendMode, PsdUserMask
+    )
+except ImportError:
+    psdtags = None
+
 from core.aligner import detect_and_align
 
 # Preset channel multipliers and color correction matrices (CCM) for astronomical CMOS sensors and DSLRs
@@ -645,3 +657,91 @@ def stack_images(image_paths, mask=None, stack_mode='average', feather_radius=10
     final_img = np.clip(final_img, 0, 65535).astype(np.uint16)
 
     return final_img, success_count, failed_reports, sky_stack, ground_stack
+
+def save_photoshop_layered_tiff(file_path, base_bgr, overlay_bgra, composite_bgr=None, layer_name="Constellations"):
+    """
+    Saves a 16-bit or 8-bit Adobe Photoshop-compatible layered TIFF document with:
+    - Layer 1: 'Background' (clean stacked astrophoto)
+    - Layer 2: overlay_bgra (annotated constellations with transparency)
+    - Composite flat image for non-layered TIFF viewers
+    """
+    if psdtags is None:
+        # Fallback if psdtags not available: save standard composite image
+        if composite_bgr is not None:
+            cv2.imwrite(file_path, composite_bgr)
+        else:
+            cv2.imwrite(file_path, base_bgr)
+        return False
+
+    h, w = base_bgr.shape[:2]
+    dtype = base_bgr.dtype
+    is_16bit = (dtype == np.uint16)
+
+    # Convert OpenCV BGR / BGRA to standard RGB / RGBA
+    base_rgb = cv2.cvtColor(base_bgr, cv2.COLOR_BGR2RGB)
+    overlay_rgba = cv2.cvtColor(overlay_bgra, cv2.COLOR_BGRA2RGBA)
+
+    r_base = base_rgb[:, :, 0]
+    g_base = base_rgb[:, :, 1]
+    b_base = base_rgb[:, :, 2]
+
+    r_over = overlay_rgba[:, :, 0]
+    g_over = overlay_rgba[:, :, 1]
+    b_over = overlay_rgba[:, :, 2]
+    a_over = overlay_rgba[:, :, 3]
+
+    layer_bg = PsdLayer(
+        name="Background",
+        rectangle=PsdRectangle(0, 0, h, w),
+        channels=[
+            PsdChannel(PsdChannelId.CHANNEL0, data=r_base, compression=PsdCompressionType.RAW),
+            PsdChannel(PsdChannelId.CHANNEL1, data=g_base, compression=PsdCompressionType.RAW),
+            PsdChannel(PsdChannelId.CHANNEL2, data=b_base, compression=PsdCompressionType.RAW),
+        ],
+        blendmode=PsdBlendMode.NORMAL,
+        opacity=255
+    )
+
+    layer_overlay = PsdLayer(
+        name=layer_name,
+        rectangle=PsdRectangle(0, 0, h, w),
+        channels=[
+            PsdChannel(PsdChannelId.TRANSPARENCY_MASK, data=a_over, compression=PsdCompressionType.RAW),
+            PsdChannel(PsdChannelId.CHANNEL0, data=r_over, compression=PsdCompressionType.RAW),
+            PsdChannel(PsdChannelId.CHANNEL1, data=g_over, compression=PsdCompressionType.RAW),
+            PsdChannel(PsdChannelId.CHANNEL2, data=b_over, compression=PsdCompressionType.RAW),
+        ],
+        blendmode=PsdBlendMode.NORMAL,
+        opacity=255
+    )
+
+    psd_layers = PsdLayers(
+        key=PsdKey.LAYER_16 if is_16bit else PsdKey.LAYER,
+        has_transparency=True,
+        layers=[layer_bg, layer_overlay]
+    )
+
+    isd = TiffImageSourceData(
+        psdformat=PsdFormat.LE32BIT,
+        layers=psd_layers,
+        usermask=PsdUserMask()
+    )
+
+    if composite_bgr is not None:
+        composite_rgb = cv2.cvtColor(composite_bgr, cv2.COLOR_BGR2RGB)
+    else:
+        composite_rgb = base_rgb.copy()
+        mask_bool = a_over > 0
+        composite_rgb[mask_bool, 0] = r_over[mask_bool]
+        composite_rgb[mask_bool, 1] = g_over[mask_bool]
+        composite_rgb[mask_bool, 2] = b_over[mask_bool]
+
+    tifffile.imwrite(
+        file_path,
+        composite_rgb,
+        photometric="rgb",
+        metadata=None,
+        extratags=[isd.tifftag()]
+    )
+    return True
+

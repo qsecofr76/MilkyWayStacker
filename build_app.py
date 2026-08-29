@@ -34,6 +34,8 @@ PyInstaller.__main__.run([
     f'--add-data={add_data_logo}',
     f'--add-data={add_data_app_logo}',
     f'--add-data=core{sep}core',
+    '--hidden-import=tifffile',
+    '--hidden-import=psdtags',
     '--clean',
     '--noconfirm'
 ])

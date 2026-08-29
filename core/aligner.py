@@ -681,15 +681,21 @@ def _load_sky_catalog():
 import json
 import os
 
-def draw_constellations(img, mask=None, cancel_event=None):
+def draw_constellations(img, mask=None, cancel_event=None, return_overlay=False):
     """
     Solves the starry sky using a local offline plate-solving engine (triangle-based hashing).
     Projects and overlays identified constellations onto the image canvas.
+    If return_overlay=True, returns (annotated_img, is_success, overlay_bgra).
     """
     print("--- Aligner Module: Starting Solve v2.1 ---")
     t_start = time.time()
     _load_sky_catalog()
+    h, w = img.shape[:2]
+    empty_overlay = np.zeros((h, w, 4), dtype=img.dtype)
+
     if _db_stars_coords is None:
+        if return_overlay:
+            return img.copy(), False, empty_overlay
         return img.copy(), False
         
     eroded = erode_mask(mask, radius=15) if mask is not None else None
@@ -711,11 +717,12 @@ def draw_constellations(img, mask=None, cancel_event=None):
                 
     if len(stars) < 4:
         print(f"--- Aligner Module: Too few stars detected ({len(stars)}) ---")
+        if return_overlay:
+            return img.copy(), False, empty_overlay
         return img.copy(), False
         
     # Only take top 15 stars for combinations to ensure extreme speed
     candidate_stars = stars[:15]
-    h, w, c = img.shape
     
     # Filter database stars for triangle matching (vmag <= 4.0)
     mask_bright = _db_stars_mags <= 4.0
@@ -735,6 +742,8 @@ def draw_constellations(img, mask=None, cancel_event=None):
     # Try finding matching triangles
     for i in range(len(candidate_stars)):
         if cancel_event is not None and cancel_event.is_set():
+            if return_overlay:
+                return img.copy(), False, empty_overlay
             return img.copy(), False
         for j in range(i+1, len(candidate_stars)):
             for k in range(j+1, len(candidate_stars)):
@@ -803,6 +812,8 @@ def draw_constellations(img, mask=None, cancel_event=None):
                                     best_dec0 = dec0
                                 
     out_img = img.copy()
+    overlay_bgra = np.zeros((h, w, 4), dtype=out_img.dtype)
+    
     if best_transform is not None and best_score >= 5:
         # Refine the initial 3-star partial affine transform using a Homography (8 DoF) fit on all matched stars
         db_pts_proj = _gnomonic_project_vectorized(_db_stars_coords[:, 0], _db_stars_coords[:, 1], best_ra0, best_dec0).astype(np.float32)
@@ -850,10 +861,14 @@ def draw_constellations(img, mask=None, cancel_event=None):
             if visible_stars >= max(2, int(len(all_stars_in_constellation) * 0.5)):
                 found_names.append(cname)
                 col_mult = 257 if out_img.dtype == np.uint16 else 1
+                alpha_val = 65535 if out_img.dtype == np.uint16 else 255
+                
                 # Draw lines
                 for s1, s2 in conn_lines:
                     if s1 in proj_pts and s2 in proj_pts:
                         cv2.line(out_img, proj_pts[s1], proj_pts[s2], (0, 255 * col_mult, 0), 2, lineType=cv2.LINE_AA)
+                        cv2.line(overlay_bgra, proj_pts[s1], proj_pts[s2], (0, 255 * col_mult, 0, alpha_val), 2, lineType=cv2.LINE_AA)
+
                 # Draw small circles for visible stars of the constellation
                 xs = []
                 ys = []
@@ -862,6 +877,7 @@ def draw_constellations(img, mask=None, cancel_event=None):
                         px, py = proj_pts[sname]
                         if 0 <= px < w and 0 <= py < h:
                             cv2.circle(out_img, (px, py), 4, (0, 0, 255 * col_mult), -1, lineType=cv2.LINE_AA)
+                            cv2.circle(overlay_bgra, (px, py), 4, (0, 0, 255 * col_mult, alpha_val), -1, lineType=cv2.LINE_AA)
                             xs.append(px)
                             ys.append(py)
                 
@@ -873,13 +889,22 @@ def draw_constellations(img, mask=None, cancel_event=None):
                                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 4, lineType=cv2.LINE_AA)
                     cv2.putText(out_img, cname, (cx + 10, cy - 10), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255 * col_mult, 0), 2, lineType=cv2.LINE_AA)
+                    
+                    cv2.putText(overlay_bgra, cname, (cx + 10, cy - 10), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0, alpha_val), 4, lineType=cv2.LINE_AA)
+                    cv2.putText(overlay_bgra, cname, (cx + 10, cy - 10), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255 * col_mult, 0, alpha_val), 2, lineType=cv2.LINE_AA)
                             
         t_end = time.time()
         if found_names:
             names_str = ", ".join(found_names)
             print(f"--- Aligner Module: SUCCESS! Solved: {names_str} (time: {t_end - t_start:.3f}s, best_score: {best_score}) ---")
+            if return_overlay:
+                return out_img, True, overlay_bgra
             return out_img, True
             
     t_end = time.time()
     print(f"--- Aligner Module: FAILED to solve (time: {t_end - t_start:.3f}s, best_score: {best_score}) ---")
+    if return_overlay:
+        return out_img, False, overlay_bgra
     return out_img, False

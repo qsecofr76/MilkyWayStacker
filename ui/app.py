@@ -19,7 +19,7 @@ from ui.canvas import MaskingCanvas
 from core.stacker import (
     stack_images, load_image, apply_gamma, feather_mask,
     SENSOR_PRESETS, calculate_auto_white_balance, apply_color_calibration,
-    apply_s_curve
+    apply_s_curve, save_photoshop_layered_tiff
 )
 from core.aligner import check_features, get_debug_matches_image, draw_constellations, get_debug_stars_image
 
@@ -1345,6 +1345,19 @@ class MilkyWayStackerApp(ctk.CTk):
             ]
         )
         if file_path:
+            ext = os.path.splitext(file_path)[1].lower()
+            
+            # If saving as TIFF with Constellations enabled, save Photoshop-compatible layered TIFF
+            if ext in [".tif", ".tiff"] and self.show_constellations_var.get():
+                mask = self.canvas.get_mask()
+                annotated, found, overlay_bgra = draw_constellations(self.output_img, mask, return_overlay=True)
+                if found:
+                    save_photoshop_layered_tiff(file_path, self.output_img, overlay_bgra, composite_bgr=annotated)
+                    bit_depth_str = "16-bit Photoshop Layered" if self.output_img.dtype == np.uint16 else "8-bit Photoshop Layered"
+                    self.status_label.configure(text=f"Saved {bit_depth_str} TIFF to: {os.path.basename(file_path)}")
+                    messagebox.showinfo("Saved", f"Stacked image successfully saved with Photoshop Constellations layer ({os.path.basename(file_path)}).")
+                    return
+
             img_to_save = self.output_img
             if self.show_constellations_var.get():
                 mask = self.canvas.get_mask()
@@ -1352,7 +1365,6 @@ class MilkyWayStackerApp(ctk.CTk):
                 if found:
                     img_to_save = annotated
 
-            ext = os.path.splitext(file_path)[1].lower()
             if ext in [".jpg", ".jpeg"]:
                 # Convert to 8-bit for JPEG format
                 if img_to_save.dtype == np.uint16:
