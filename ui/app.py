@@ -1262,7 +1262,7 @@ class MilkyWayStackerApp(ctk.CTk):
             err_title.pack(anchor="w", padx=20, pady=(10, 2))
 
             # Scrollable textbox to show details
-            textbox = ctk.CTkTextBox(report_win, width=500, height=250)
+            textbox = ctk.CTkTextbox(report_win, width=500, height=250)
             textbox.pack(padx=20, pady=5)
             
             for idx, item in enumerate(failed_reports):
