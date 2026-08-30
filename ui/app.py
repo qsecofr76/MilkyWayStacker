@@ -19,7 +19,7 @@ from ui.canvas import MaskingCanvas
 from core.stacker import (
     stack_images, load_image, apply_gamma, feather_mask,
     SENSOR_PRESETS, calculate_auto_white_balance, apply_color_calibration,
-    apply_s_curve, save_photoshop_layered_tiff
+    apply_s_curve, save_photoshop_layered_tiff, RAW_EXTENSIONS
 )
 from core.aligner import check_features, get_debug_matches_image, draw_constellations, get_debug_stars_image
 
@@ -383,7 +383,7 @@ class MilkyWayStackerApp(ctk.CTk):
         if not files:
             return
         
-        valid_exts = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".dng", ".fit", ".fits", ".nef", ".cr2", ".cr3", ".arw", ".dcr"}
+        valid_exts = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".fit", ".fits"} | RAW_EXTENSIONS
         
         clean_files = []
         for f in files:
@@ -403,9 +403,15 @@ class MilkyWayStackerApp(ctk.CTk):
             self._process_loaded_files(clean_files)
 
     def load_images(self):
+        raw_wildcards = " ".join(f"*{ext}" for ext in sorted(RAW_EXTENSIONS))
         files = filedialog.askopenfilenames(
             title="Select Images for Stacking",
-            filetypes=[("Image files", "*.jpg *.jpeg *.png *.tif *.tiff *.dng *.fit *.fits *.nef *.cr2 *.cr3 *.arw *.dcr")]
+            filetypes=[
+                ("All Supported Images", f"*.jpg *.jpeg *.png *.tif *.tiff *.fit *.fits {raw_wildcards}"),
+                ("Camera RAW & FITS Files", f"*.fit *.fits {raw_wildcards}"),
+                ("Standard Images (TIFF, PNG, JPEG)", "*.tif *.tiff *.png *.jpg *.jpeg"),
+                ("All Files", "*.*")
+            ]
         )
         if not files:
             return

@@ -361,11 +361,19 @@ def stack_parallel_chunks(img_list, stack_mode, remove_trails, progress_callback
                 
     return stacked_img
 
+# Set of camera RAW formats supported via LibRaw / rawpy (including Olympus ORF/ORI, Canon CR2/CR3, Nikon NEF, Sony ARW, etc.)
+RAW_EXTENSIONS = {
+    '.dng', '.nef', '.nrw', '.cr2', '.cr3', '.crw', '.arw', '.srf', '.sr2',
+    '.orf', '.ori', '.rw2', '.pef', '.ptx', '.raf', '.dcr', '.kdc', '.mrw',
+    '.3fr', '.iiq', '.rwl'
+}
+
 def load_image(path):
     """
     Robustly loads images in full 16-bit high dynamic range (uint16, 0..65535).
-    Supports 16-bit astronomical FITS, RAW files (CR2/CR3/NEF/ARW/DNG), 16-bit TIFFs,
-    and standard 8-bit image formats (upscaled cleanly to 16-bit).
+    Supports 16-bit astronomical FITS, Camera RAW files (Olympus ORF, Canon CR2/CR3, 
+    Nikon NEF, Sony ARW, Panasonic RW2, Fujifilm RAF, Pentax PEF, Adobe DNG), 
+    16-bit TIFFs, and standard 8-bit image formats (upscaled cleanly to 16-bit).
     """
     ext = os.path.splitext(path)[1].lower()
     
@@ -433,7 +441,7 @@ def load_image(path):
         except Exception as e:
             print(f"Failed to load FITS file {path} with astropy: {e}")
             
-    elif ext == '.dng' or ext in ['.nef', '.cr2', '.cr3', '.arw', '.dcr']:
+    elif ext in RAW_EXTENSIONS:
         try:
             import rawpy
             with rawpy.imread(path) as raw:
